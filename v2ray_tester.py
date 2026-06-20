@@ -114,7 +114,6 @@ class App(ctk.CTk):
         self._style_tree()
         self._load_config()
         self._refresh_core_status()
-        self.after(200, self.autofetch_on_launch)
 
     # ------------------------------------------------------------- ui builder
     def _card(self, master, **kw):
@@ -953,8 +952,8 @@ class App(ctk.CTk):
 
     def _start_fetch(self, urls, progress, done):
         """Single-flight fetch. Bumping the generation token cancels any fetch
-        already running, so the launch auto-fetch and a manual Fetch All can never
-        run at the same time (which previously double-counted and doubled configs)."""
+        already running, so two Fetch All runs can never overlap (which would
+        double-count and double the configs)."""
         self._fetch_gen += 1
         gen = self._fetch_gen
         threading.Thread(target=self._fetch_worker, args=(urls, gen, progress, done),
@@ -1024,38 +1023,6 @@ class App(ctk.CTk):
             self.sub_win.destroy()
             self.sub_win = None
 
-    # -- auto-fetch on launch --
-    def _subs_from_file(self):
-        try:
-            with open(SUBS_FILE, "r", encoding="utf-8") as f:
-                text = f.read()
-        except Exception:
-            return []
-        return [ln.strip() for ln in text.splitlines()
-                if ln.strip() and not ln.strip().startswith("#")]
-
-    def autofetch_on_launch(self):
-        """Pull fresh configs from the saved subscription URLs at startup, since
-        subscriptions update every few hours and aren't persisted between runs."""
-        urls = self._subs_from_file()
-        if not urls:
-            return
-        self.counts.configure(text="auto-fetching " + str(len(urls)) + " subscription(s)…")
-        self._start_fetch(urls, self._auto_progress, self._auto_done)
-
-    def _auto_progress(self, gen, done, total, ok, configs):
-        if gen != self._fetch_gen:
-            return
-        self.counts.configure(text="auto-fetching " + str(done) + "/" + str(total)
-                              + " · " + str(ok) + " ok · " + str(configs) + " configs")
-
-    def _auto_done(self, gen, links):
-        if gen != self._fetch_gen:
-            return
-        if links.strip():
-            self._set_links(links)      # replace
-            self.parse_only()
-
     # ---------------------------------------------------------------- config
     def _load_config(self):
         try:
@@ -1074,7 +1041,8 @@ class App(ctk.CTk):
             self._reach_targets = [[str(t[0]), str(t[1])] for t in rt
                                    if isinstance(t, (list, tuple)) and len(t) == 2]
         # NOTE: the config list is intentionally NOT restored — subscriptions go
-        # stale within hours, so configs are re-pulled fresh on each launch.
+        # stale within hours, so the box starts empty; use Load from Subscription
+        # to pull fresh configs when you want to test.
 
     def _save_config(self):
         cfg = {
