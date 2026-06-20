@@ -5,6 +5,18 @@ actually work on your current network**. For each config it starts the proxy
 locally and measures the real HTTP latency (ms) to Google through it — same idea
 as v2rayN's own latency test.
 
+## Download (no Python needed)
+
+Grab the standalone Windows build from the
+[**latest release**](https://github.com/tnt1576-a11y/v2raytester/releases/latest):
+
+1. Download `v2raytester.exe`.
+2. Put it **inside your v2rayN folder** (the one containing `bin\xray\xray.exe`
+   and `bin\sing_box\sing-box.exe`) — the app reuses those cores.
+3. Double-click to run.
+
+Or run from source (below).
+
 ## Install
 
 This app reuses the `xray` and `sing-box` binaries that ship with
@@ -30,6 +42,15 @@ The bottom status bar shows the detected core versions (e.g.
 `xray 26.2.6 | sing-box 1.12.21`). Discovery is version-tolerant: it handles the
 different `bin\` layouts v2rayN has used across releases and falls back to a
 recursive search.
+
+### Build the .exe yourself
+
+```
+pip install pyinstaller customtkinter
+pyinstaller --onefile --noconsole --name v2raytester --collect-all customtkinter v2ray_tester.py
+```
+
+The result is `dist\v2raytester.exe`.
 
 ## Usage
 

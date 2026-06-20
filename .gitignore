@@ -48,6 +48,10 @@ working.txt
 !LICENSE
 !subs.txt
 
+# Build artifacts
+*.spec
+_build.log
+
 # IDE
 .vscode/
 .idea/
