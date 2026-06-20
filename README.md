@@ -42,6 +42,11 @@ recursive search.
    - **Ping** — direct TCP connect time to the server (independent of the proxy)
    - **Latency** — real HTTP delay through the proxy, color-graded
      (bright green < 150 ms, lime 150–350, amber > 350)
+   - **Sites** — real-destination reachability through the proxy (when *Test
+     sites* is on): e.g. `YT✓ IG✓ TG✗ AI✓`. A config can pass the Google test
+     yet still be blocked/geo-restricted for the sites you actually want — this
+     column shows what each working proxy can really reach. Edit the target list
+     with **Edit…** (defaults: YouTube, Instagram, Telegram, OpenAI).
    - **Exit** — the proxy's exit country + IP (when *Exit IP/Geo* is on)
    - **Status** — `online` / `timeout` / `failed` / `unsupported`; hover a failed
      row to see the full core/curl error

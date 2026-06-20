@@ -84,6 +84,8 @@ class App(ctk.CTk):
         self.testing = False
         self.geo_var = tk.BooleanVar(value=True)
         self.prefilter_var = tk.BooleanVar(value=True)
+        self.reach_var = tk.BooleanVar(value=True)
+        self._reach_targets = [list(t) for t in tester.DEFAULT_REACH_TARGETS]
         self._test_total = 0
         self._skipped = 0
         self._ping_ms = {}
@@ -215,6 +217,13 @@ class App(ctk.CTk):
                         font=self.f_body, checkbox_width=20, checkbox_height=20,
                         corner_radius=5, fg_color=GREEN, hover_color=GREEN_HOV,
                         text_color=MUTED, border_color=STROKE).grid(row=0, column=5, padx=(16, 0))
+        ctk.CTkCheckBox(opts, text="Test sites", variable=self.reach_var,
+                        font=self.f_body, checkbox_width=20, checkbox_height=20,
+                        corner_radius=5, fg_color=GREEN, hover_color=GREEN_HOV,
+                        text_color=MUTED, border_color=STROKE).grid(row=0, column=6, padx=(16, 0))
+        ctk.CTkButton(opts, text="Edit…", width=52, height=28, corner_radius=8,
+                      font=self.f_body, fg_color=CARD2, hover_color=GREEN_DEEP,
+                      text_color=MUTED, command=self._edit_sites).grid(row=0, column=7, padx=(6, 0))
 
         urlf = ctk.CTkFrame(ctrl, fg_color="transparent")
         urlf.grid(row=0, column=4, sticky="ew", padx=(12, 16))
@@ -272,9 +281,9 @@ class App(ctk.CTk):
         shared."""
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(0, weight=1)
-        cols = ("idx", "tag", "type", "addr", "ping", "latency", "exit", "status")
-        heads = ("#", "Alias", "Type", "Server : Port", "Ping", "Latency", "Exit", "Status")
-        widths = (44, 240, 90, 260, 80, 90, 120, 190)
+        cols = ("idx", "tag", "type", "addr", "ping", "latency", "sites", "exit", "status")
+        heads = ("#", "Alias", "Type", "Server : Port", "Ping", "Latency", "Sites", "Exit", "Status")
+        widths = (44, 200, 80, 230, 70, 80, 150, 110, 170)
         tree = ttk.Treeview(parent, columns=cols, show="headings",
                             selectmode="extended", style="Green.Treeview")
         for c, h, w in zip(cols, heads, widths):
@@ -393,15 +402,58 @@ class App(ctk.CTk):
             "concurrency": threads,
             "geo": bool(self.geo_var.get()),
             "prefilter": bool(self.prefilter_var.get()),
+            "reach_targets": self._reach_targets if self.reach_var.get() else [],
             "ping_concurrency": max(800, threads * 16),
             "start_timeout": 3,
             "ping_timeout": 2,
         }
 
+    def _edit_sites(self):
+        """Small editor for the reachability target list (one 'CODE url' per line)."""
+        win = ctk.CTkToplevel(self)
+        win.title("Reachability targets")
+        win.geometry("540x360")
+        win.configure(fg_color=BG)
+        win.transient(self)
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(win, text="One per line:  CODE  https://url/to/check   "
+                     "(a short code + a lightweight URL)",
+                     font=self.f_body, text_color=MUTED, anchor="w")\
+            .grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+        box = ctk.CTkTextbox(win, font=("Consolas", 12), fg_color=CARD2,
+                             border_color=STROKE, border_width=1, text_color=FG)
+        box.grid(row=1, column=0, sticky="nsew", padx=14, pady=4)
+        box.insert("1.0", "\n".join(c + " " + u for c, u in self._reach_targets))
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.grid(row=2, column=0, sticky="e", padx=14, pady=(4, 12))
+
+        def save():
+            targets = []
+            for ln in box.get("1.0", "end").splitlines():
+                parts = ln.split(None, 1)
+                if len(parts) == 2 and "://" in parts[1]:
+                    targets.append([parts[0][:6], parts[1].strip()])
+            self._reach_targets = targets
+            win.destroy()
+
+        ctk.CTkButton(btns, text="Reset", width=80, fg_color=CARD2,
+                      hover_color=GREEN_DEEP, text_color=MUTED,
+                      command=lambda: (box.delete("1.0", "end"),
+                                       box.insert("1.0", "\n".join(
+                                           c + " " + u for c, u in tester.DEFAULT_REACH_TARGETS))))\
+            .grid(row=0, column=0, padx=4)
+        ctk.CTkButton(btns, text="Cancel", width=80, fg_color=CARD2,
+                      hover_color=GREEN_DEEP, text_color=MUTED, command=win.destroy)\
+            .grid(row=0, column=1, padx=4)
+        ctk.CTkButton(btns, text="Save", width=80, fg_color=GREEN,
+                      hover_color=GREEN_HOV, command=save).grid(row=0, column=2, padx=4)
+        win.after(120, lambda: (win.lift(), win.focus_force()))
+
     def _insert_row(self, i, n, ping_s=""):
         self.tree.insert("", "end", iid=str(i),
                          values=(i + 1, n.get("tag", ""), n["type"],
-                                 n["server"] + ":" + str(n["port"]), ping_s, "", "", "· testing"),
+                                 n["server"] + ":" + str(n["port"]), ping_s, "", "", "", "· testing"),
                          tags=("test",))
 
     def start_tests(self):
@@ -568,9 +620,10 @@ class App(ctk.CTk):
         label = STATUS_LABEL.get(status, status)
         if res.get("message") and status != tester.OK:
             label += " · " + res["message"]
+        sites_s = self._fmt_reach(res.get("reach"))
         n = res["node"]
         values = (idx + 1, n.get("tag", ""), n["type"],
-                  n["server"] + ":" + str(n["port"]), ping_s, lat, exit_s, label)
+                  n["server"] + ":" + str(n["port"]), ping_s, lat, sites_s, exit_s, label)
         if self.tree.exists(iid):  # O(1); row may have been deleted
             self.tree.item(iid, values=values, tags=(tag,))
 
@@ -589,6 +642,13 @@ class App(ctk.CTk):
         # single-row path (retest): apply + refresh immediately
         self._apply_result(idx, res)
         self._update_counts()
+
+    @staticmethod
+    def _fmt_reach(reach):
+        """Compact per-site reachability, e.g. 'YT✓ IG✓ TG✗ AI✓'."""
+        if not reach:
+            return ""
+        return " ".join(code + ("✓" if ok else "✗") for code, ok in reach.items())
 
     def _gradient_tag(self, lat_ms):
         if lat_ms is None:
@@ -1008,6 +1068,11 @@ class App(ctk.CTk):
         self.conc_var.set(str(cfg.get("concurrency", 8)))
         self.geo_var.set(bool(cfg.get("geo", True)))
         self.prefilter_var.set(bool(cfg.get("prefilter", True)))
+        self.reach_var.set(bool(cfg.get("reach", True)))
+        rt = cfg.get("reach_targets")
+        if isinstance(rt, list) and rt:
+            self._reach_targets = [[str(t[0]), str(t[1])] for t in rt
+                                   if isinstance(t, (list, tuple)) and len(t) == 2]
         # NOTE: the config list is intentionally NOT restored — subscriptions go
         # stale within hours, so configs are re-pulled fresh on each launch.
 
@@ -1018,6 +1083,8 @@ class App(ctk.CTk):
             "concurrency": int(self.conc_var.get()),
             "geo": bool(self.geo_var.get()),
             "prefilter": bool(self.prefilter_var.get()),
+            "reach": bool(self.reach_var.get()),
+            "reach_targets": self._reach_targets,
         }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
