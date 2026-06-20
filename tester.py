@@ -21,6 +21,18 @@ import cores
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _CURL = shutil.which("curl") or "curl"
 _GEO_URL = "http://ip-api.com/json/?fields=query,countryCode"
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+# Real-destination reachability: hit lightweight endpoints on popular sites
+# *through* a working proxy to see what it can actually reach (not just Google).
+# [short code, url]. Editable in-app / via config.
+DEFAULT_REACH_TARGETS = [
+    ["YT", "https://www.youtube.com/generate_204"],
+    ["IG", "https://www.instagram.com/favicon.ico"],
+    ["TG", "https://web.telegram.org/"],
+    ["AI", "https://api.openai.com/v1/models"],
+]
 
 # status values
 OK = "ok"
@@ -153,8 +165,51 @@ def _geo_lookup(port, max_time):
         return "", ""
 
 
+def _reachable(code):
+    """A target counts as reachable if the proxy got a usable HTTP response.
+    2xx/3xx = yes; 401/405 = server answered (auth/method) so the path works;
+    000 (no response, censored) and 403/451/429 (geo-blocked) = no."""
+    if not code or not code.isdigit():
+        return False
+    n = int(code)
+    if n in (401, 405):
+        return True
+    return 200 <= n < 400
+
+
+def _reach_check(port, url, max_time):
+    """True if ``url`` responds with a usable code through the local SOCKS proxy."""
+    try:
+        out = subprocess.run(
+            [_CURL, "--socks5-hostname", "127.0.0.1:" + str(port), "-s",
+             "-o", os.devnull, "-w", "%{http_code}", "-A", _UA,
+             "--max-time", str(max_time), url],
+            capture_output=True, text=True, timeout=max_time + 4,
+            creationflags=_NO_WINDOW,
+        )
+        return _reachable((out.stdout or "").strip()[-3:])
+    except Exception:
+        return False
+
+
+def _reach_all(port, settings, stop_event=None):
+    """Run every configured reachability target through an already-running proxy.
+    Returns {code: bool}. Sequential + short timeout to stay bounded; only ever
+    runs for configs that already passed the base test."""
+    targets = settings.get("reach_targets") or []
+    if not targets:
+        return {}
+    rt = min(int(settings.get("timeout", 8)), 7)
+    out = {}
+    for code, url in targets:
+        if stop_event is not None and stop_event.is_set():
+            break
+        out[code] = _reach_check(port, url, rt)
+    return out
+
+
 def _result(node, status, latency=None, message="", detail="",
-            exit_ip="", country="", tcp=None):
+            exit_ip="", country="", tcp=None, reach=None):
     return {
         "node": node,
         "type": node.get("type", ""),
@@ -168,6 +223,7 @@ def _result(node, status, latency=None, message="", detail="",
         "exit_ip": exit_ip,
         "country": country,
         "tcp_ping": tcp,
+        "reach": reach or {},
     }
 
 
@@ -223,7 +279,9 @@ def _proxy_attempt(node, path, settings, stop_event):
                 ip, cc = ("", "")
                 if settings.get("geo"):
                     ip, cc = _geo_lookup(port, max_time)
-                return _result(node, OK, latency=latency, exit_ip=ip, country=cc), False
+                reach = _reach_all(port, settings, stop_event)  # core still alive
+                return _result(node, OK, latency=latency, exit_ip=ip,
+                               country=cc, reach=reach), False
             if code == "000":
                 return _result(node, TIMEOUT, message="no response (000)", detail=cdetail), False
             return _result(node, FAILED, latency=latency, message="HTTP " + code,
