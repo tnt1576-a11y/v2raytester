@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose draws its own Material3 theme; this just styles the window chrome
+         dark to match the app and avoid a white flash on launch. -->
+    <style name="Theme.V2rayTester" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/background_dark</item>
+        <item name="android:statusBarColor">@android:color/background_dark</item>
+        <item name="android:navigationBarColor">@android:color/background_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
