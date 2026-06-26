@@ -1,0 +1,21 @@
+package com.v2raytester.core
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+
+class EngineLogicTest {
+    private val engine = TestEngine(xrayPath = "", workDir = File("."))
+
+    @Test fun reachable_code_mapping() {
+        // usable
+        for (c in listOf(200, 201, 204, 301, 302, 308, 401, 405)) {
+            assertTrue("$c should be reachable", engine.reachable(c))
+        }
+        // not usable: censored / geo-blocked / errors
+        for (c in listOf(0, 400, 403, 429, 451, 500, 502)) {
+            assertFalse("$c should be unreachable", engine.reachable(c))
+        }
+    }
+}
