@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -24,6 +25,16 @@ fun TesterScreen(vm: TesterViewModel) {
     val ctx = LocalContext.current
     var showSubs by remember { mutableStateOf(false) }
     var showSites by remember { mutableStateOf(false) }
+
+    // Keep the screen on while a test or subscription fetch runs. A screen timeout
+    // backgrounds the app, which throttles the test coroutines and can freeze/kill
+    // the spawned xray processes — stalling the run. This holds it only while busy.
+    val view = LocalView.current
+    val keepScreenOn = vm.testing.value || vm.fetching.value
+    DisposableEffect(keepScreenOn) {
+        view.keepScreenOn = keepScreenOn
+        onDispose { view.keepScreenOn = false }
+    }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) runCatching {
@@ -108,7 +119,7 @@ private fun ControlsCard(vm: TesterViewModel, onEditSites: () -> Unit) {
                         Text("Test All", fontWeight = FontWeight.Bold)
                     }
                 }
-                SettingMenu("Threads", s.concurrency.toString(), listOf("4", "6", "8", "12", "16", "24")) {
+                SettingMenu("Threads", s.concurrency.toString(), listOf("4", "6", "8", "12", "16", "24", "32", "48", "64")) {
                     vm.updateSettings(s.copy(concurrency = it.toInt()))
                 }
                 SettingMenu("Timeout", s.timeoutSec.toString(), listOf("5", "8", "10", "15")) {
