@@ -108,7 +108,7 @@ private fun ControlsCard(vm: TesterViewModel, onEditSites: () -> Unit) {
                         Text("Test All", fontWeight = FontWeight.Bold)
                     }
                 }
-                SettingMenu("Threads", s.concurrency.toString(), listOf("4", "6", "8", "12", "16", "24")) {
+                SettingMenu("Threads", s.concurrency.toString(), listOf("4", "6", "8", "12", "16", "24", "32", "48", "64")) {
                     vm.updateSettings(s.copy(concurrency = it.toInt()))
                 }
                 SettingMenu("Timeout", s.timeoutSec.toString(), listOf("5", "8", "10", "15")) {
