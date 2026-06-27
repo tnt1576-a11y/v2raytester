@@ -34,6 +34,7 @@ v2rayN.exe
 v2rayN.icns
 v2rayN.png
 AmazTool.exe
+v2raytester.exe
 *.dll
 bin/
 !bin/
