@@ -14,8 +14,9 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = "1.0.1"
-        // The bundled xray binary is arm64 only (covers ~all modern phones).
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // arm64 covers ~all modern phones; x86_64 is added so the app's proxy-test
+        // path (which execs the bundled xray binary) also runs on an x86_64 emulator.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     buildTypes {
