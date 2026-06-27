@@ -59,11 +59,11 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     private var stopFlag = AtomicBoolean(false)
     private var runJob: Job? = null
     private var fetchGen = 0
-    private val MAX_CONFIGS = 30000   // mobile memory guard for huge aggregator subs
 
     // counters (mutated only on the single Main consumer)
     private var pingDone = 0; private var pingReach = 0; private var pingTotal = 0
-    private var testDone = 0; private var testTotal = 0; private var okCount = 0; private var skipped = 0
+    private var testDone = 0; private var testTotal = 0; private var okCount = 0
+    val skipped = mutableStateOf(0)   // prefilter-dropped (dead) count, surfaced on the Info tab
 
     private sealed class Ev {
         data class Ping(val idx: Int, val ms: Int?) : Ev()
@@ -81,7 +81,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 .joinToString("\n")
         }
         // single consumer applies engine events to Compose state safely. Drain in
-        // batches so a huge run (up to MAX_CONFIGS nodes) coalesces recomposition
+        // batches so a huge run (tens of thousands of nodes) coalesces recomposition
         // into one pass per batch instead of yielding the main thread after every
         // single event — the per-event yield was starving the UI on big runs.
         viewModelScope.launch(Dispatchers.Main) {
@@ -145,7 +145,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         val ns = if (configText.value.isNotBlank()) parse() else nodes.toList()
         if (ns.isEmpty()) { status.value = "no configs to test"; return }
         results.clear(); allOrder.clear(); workingOrder.clear()
-        pingDone = 0; pingReach = 0; testDone = 0; okCount = 0; skipped = 0
+        pingDone = 0; pingReach = 0; testDone = 0; okCount = 0; skipped.value = 0
         stopFlag = AtomicBoolean(false)
         testing.value = true
         openWorkFile()
@@ -165,7 +165,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                         stop = stop,
                     )
                     indices = reachable
-                    skipped = ns.size - reachable.size
+                    skipped.value = ns.size - reachable.size
                 } else {
                     indices = ns.indices.toList()
                     indices.forEach { pings[it] = null }
@@ -247,7 +247,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun updateCounts() {
         var t = "✓ $okCount online · $testDone/$testTotal tested"
-        if (skipped > 0) t += " · $skipped skipped"
+        if (skipped.value > 0) t += " · ${skipped.value} skipped"
         status.value = t
     }
 
@@ -298,14 +298,15 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         fetchGen++; val gen = fetchGen
         fetching.value = true; subProgress.value = 0f
         viewModelScope.launch(Dispatchers.IO) {
-            // Parse INCREMENTALLY off the main thread, dedupe on the fly, and cap
-            // the total. Aggregator subs can hold 250k+ configs; materializing all
-            // of them (or dumping them into a TextField) OOM-crashes a phone.
+            // Parse INCREMENTALLY off the main thread and dedupe on the fly. No cap:
+            // we keep every unique config the subscriptions provide (the dedupe keeps
+            // the count down). Parsing stays off the main thread and configs never go
+            // into the TextField, so this won't freeze/OOM the UI the way a naive load
+            // would — but a giant aggregate will still use a lot of heap.
             val collected = ArrayList<Node>()
             val seen = HashSet<String>()
             var ok = 0
-            var capped = false
-            loop@ for ((i, u) in urls.withIndex()) {
+            for ((i, u) in urls.withIndex()) {
                 if (gen != fetchGen) return@launch
                 val links = subs.fetchOne(u)
                 if (links.isNotEmpty()) {
@@ -314,10 +315,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                         val l = line.trim()
                         if (l.isEmpty() || l.startsWith("#") || l.startsWith("//")) continue
                         val n = try { ShareLinks.parseLink(l) } catch (e: Exception) { null } ?: continue
-                        if (seen.add(n.dedupeKey)) {
-                            collected.add(n)
-                            if (collected.size >= MAX_CONFIGS) { capped = true; break@loop }
-                        }
+                        if (seen.add(n.dedupeKey)) collected.add(n)
                     }
                 }
                 val done = i + 1
@@ -333,7 +331,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 nodes.clear(); nodes.addAll(collected)
                 configText.value = ""          // don't dump megabytes into the box
                 results.clear(); allOrder.clear(); workingOrder.clear()
-                val msg = "${collected.size} configs loaded" + if (capped) " (capped at $MAX_CONFIGS)" else ""
+                val msg = "${collected.size} configs loaded"
                 status.value = msg
                 subStatus.value = msg
                 fetching.value = false
