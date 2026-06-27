@@ -27,7 +27,8 @@ import java.util.concurrent.TimeUnit
  *   (`applicationInfo.nativeLibraryDir + "/libxray.so"`).
  * @param workDir a writable dir for per-test config/log files (`cacheDir`).
  *
- * Pure java.*/OkHttp/coroutines — no android.* imports.
+ * Pure java / OkHttp / coroutines (no android.* imports), so the logic stays
+ * unit-testable on the JVM.
  */
 class TestEngine(
     private val xrayPath: String,

@@ -251,14 +251,20 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
             .mapNotNull { results[it]?.node?.raw }
             .joinToString("\n")
 
-    private fun openWorkFile() = try { workFile.writeText("") } catch (e: Exception) {}
-    private fun appendWorkFile(raw: String) = try {
-        if (raw.isNotEmpty()) workFile.appendText(raw + "\n")
-    } catch (e: Exception) {}
+    private fun openWorkFile() {
+        try { workFile.writeText("") } catch (e: Exception) {}
+    }
 
-    private fun rewriteWorkingSorted() = try {
-        workFile.writeText(workingLinks().let { if (it.isEmpty()) "" else it + "\n" })
-    } catch (e: Exception) {}
+    private fun appendWorkFile(raw: String) {
+        if (raw.isEmpty()) return
+        try { workFile.appendText(raw + "\n") } catch (e: Exception) {}
+    }
+
+    private fun rewriteWorkingSorted() {
+        try {
+            workFile.writeText(workingLinks().let { if (it.isEmpty()) "" else it + "\n" })
+        } catch (e: Exception) {}
+    }
 
     // ------------------------------------------------------- subscriptions
     fun saveSubUrls(text: String) { subUrlsText.value = text; subs.saveUrlsText(text) }
