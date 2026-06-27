@@ -5,6 +5,10 @@ actually work on your current network**. For each config it starts the proxy
 locally and measures the real HTTP latency (ms) to Google through it — same idea
 as v2rayN's own latency test.
 
+> 📱 **Android app:** there's now a self-contained Android version (Kotlin/Compose,
+> Xray core bundled — no v2rayN needed). See [`android/`](android/) and grab the APK
+> from a release tagged `android-v*`.
+
 ## Download (no Python needed)
 
 Grab the standalone Windows build from the
