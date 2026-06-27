@@ -4,8 +4,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -86,15 +84,17 @@ class TestEngine(
         val groups = LinkedHashMap<Pair<String, Int>, MutableList<Int>>()
         nodes.forEachIndexed { i, n -> groups.getOrPut(n.server to n.port) { mutableListOf() }.add(i) }
         val reachable = Collections.synchronizedList(ArrayList<Int>())
-        val sem = Semaphore(settings.pingConcurrency.coerceAtLeast(1))
+        // tcpPing blocks a thread, and Dispatchers.IO only grows to ~64 threads — which
+        // silently capped real ping concurrency at 64 no matter how high pingConcurrency
+        // was. limitedParallelism gives the full configured width, so the prefilter
+        // actually runs pingConcurrency-wide (the slow part of a big run).
+        val disp = Dispatchers.IO.limitedParallelism(settings.pingConcurrency.coerceAtLeast(1))
         groups.entries.map { (ep, idxs) ->
-            async(Dispatchers.IO) {
-                sem.withPermit {
-                    val ms = if (stop()) null else tcpPing(ep.first, ep.second, settings.pingTimeoutSec * 1000)
-                    for (i in idxs) {
-                        if (ms != null) reachable.add(i)
-                        onPing(i, ms)
-                    }
+            async(disp) {
+                val ms = if (stop()) null else tcpPing(ep.first, ep.second, settings.pingTimeoutSec * 1000)
+                for (i in idxs) {
+                    if (ms != null) reachable.add(i)
+                    onPing(i, ms)
                 }
             }
         }.awaitAll()
@@ -232,14 +232,15 @@ class TestEngine(
         onResult: (Int, TestResult) -> Unit,
         stop: () -> Boolean,
     ) = coroutineScope {
-        val sem = Semaphore(settings.concurrency.coerceAtLeast(1))
+        // Each test spawns an xray process; Dispatchers.IO caps blocking threads at ~64,
+        // so honor the chosen concurrency explicitly via limitedParallelism. (Very high
+        // values mean many concurrent xray processes — fast, but heavier on RAM and can
+        // inflate latency / cause false failures on a phone.)
+        val disp = Dispatchers.IO.limitedParallelism(settings.concurrency.coerceAtLeast(1))
         indices.map { idx ->
-            async(Dispatchers.IO) {
+            async(disp) {
                 if (stop()) return@async
-                sem.withPermit {
-                    if (stop()) return@withPermit
-                    onResult(idx, testNode(nodes[idx], settings, stop, pings[idx]))
-                }
+                onResult(idx, testNode(nodes[idx], settings, stop, pings[idx]))
             }
         }.awaitAll()
     }
