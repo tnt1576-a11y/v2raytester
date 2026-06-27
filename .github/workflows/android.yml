@@ -13,6 +13,10 @@ on:
       - "android/**"
   workflow_dispatch:
 
+# needed so the tag build can create/attach to a GitHub Release
+permissions:
+  contents: write
+
 # pin the Xray core version that gets bundled as libxray.so
 env:
   XRAY_VERSION: v26.3.27
