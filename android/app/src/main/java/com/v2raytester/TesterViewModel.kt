@@ -80,9 +80,19 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 .filter { val t = it.trim(); t.isNotEmpty() && !t.startsWith("#") && !t.startsWith("//") }
                 .joinToString("\n")
         }
-        // single consumer applies engine events to Compose state safely
+        // single consumer applies engine events to Compose state safely. Drain in
+        // batches so a huge run (up to MAX_CONFIGS nodes) coalesces recomposition
+        // into one pass per batch instead of yielding the main thread after every
+        // single event — the per-event yield was starving the UI on big runs.
         viewModelScope.launch(Dispatchers.Main) {
-            for (e in events) applyEvent(e)
+            while (true) {
+                applyEvent(events.receive())
+                var n = 0
+                while (n < 256) {
+                    val e = events.tryReceive().getOrNull() ?: break
+                    applyEvent(e); n++
+                }
+            }
         }
     }
 
@@ -141,37 +151,42 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         openWorkFile()
 
         runJob = viewModelScope.launch(Dispatchers.Default) {
-            val s = settings.value
-            val stop = { stopFlag.get() }
-            val pings = HashMap<Int, Int?>()
-            val indices: List<Int>
+            try {
+                val s = settings.value
+                val stop = { stopFlag.get() }
+                val pings = HashMap<Int, Int?>()
+                val indices: List<Int>
 
-            if (s.prefilter) {
-                phase.value = "ping"; pingTotal = ns.size; progress.value = 0f
-                val reachable = engine.pingFilter(
-                    ns, s,
-                    onPing = { i, ms -> pings[i] = ms; events.trySend(Ev.Ping(i, ms)) },
+                if (s.prefilter) {
+                    phase.value = "ping"; pingTotal = ns.size; progress.value = 0f
+                    val reachable = engine.pingFilter(
+                        ns, s,
+                        onPing = { i, ms -> pings[i] = ms; events.trySend(Ev.Ping(i, ms)) },
+                        stop = stop,
+                    )
+                    indices = reachable
+                    skipped = ns.size - reachable.size
+                } else {
+                    indices = ns.indices.toList()
+                    indices.forEach { pings[it] = null }
+                }
+                // seed tested rows as pending. allOrder was just cleared in startTests,
+                // so add the whole list once (per-item adds re-recompose the LazyColumn).
+                testTotal = indices.size; testDone = 0
+                phase.value = "test"
+                indices.forEach { i -> results[i] = TestResult(ns[i], Status.PENDING, tcpPing = pings[i]) }
+                allOrder.addAll(indices)
+                engine.runTests(
+                    ns, s, indices, pings,
+                    onResult = { i, r -> events.trySend(Ev.Result(i, r)) },
                     stop = stop,
                 )
-                indices = reachable
-                skipped = ns.size - reachable.size
-            } else {
-                indices = ns.indices.toList()
-                indices.forEach { pings[it] = null }
+            } finally {
+                // ALWAYS reset run state — even when the job is cancelled by stop().
+                // Previously finishRun() was the last statement and got skipped on
+                // cancellation, leaving testing=true (UI stuck on "Stop" forever).
+                finishRun()
             }
-            // seed tested rows as pending
-            testTotal = indices.size; testDone = 0
-            phase.value = "test"
-            indices.forEach { i ->
-                results[i] = TestResult(ns[i], Status.PENDING, tcpPing = pings[i])
-                if (!allOrder.contains(i)) allOrder.add(i)
-            }
-            engine.runTests(
-                ns, s, indices, pings,
-                onResult = { i, r -> events.trySend(Ev.Result(i, r)) },
-                stop = stop,
-            )
-            finishRun()
         }
     }
 
