@@ -85,7 +85,7 @@ data class TestResult(
 data class Settings(
     val testUrl: String = DEFAULT_URL,
     val timeoutSec: Int = 8,
-    val concurrency: Int = 6,
+    val concurrency: Int = 16,
     val geo: Boolean = true,
     val prefilter: Boolean = true,
     val reachEnabled: Boolean = true,

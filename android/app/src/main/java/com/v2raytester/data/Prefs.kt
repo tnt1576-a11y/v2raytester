@@ -35,7 +35,7 @@ class Prefs(private val context: Context) {
         Settings(
             testUrl = p[Keys.URL] ?: DEFAULT_URL,
             timeoutSec = p[Keys.TIMEOUT] ?: 8,
-            concurrency = p[Keys.CONC] ?: 6,
+            concurrency = p[Keys.CONC] ?: 16,
             geo = p[Keys.GEO] ?: true,
             prefilter = p[Keys.PREFILTER] ?: true,
             reachEnabled = p[Keys.REACH] ?: true,
