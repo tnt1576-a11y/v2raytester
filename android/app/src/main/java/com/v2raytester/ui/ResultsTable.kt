@@ -4,12 +4,15 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -57,14 +60,31 @@ fun ResultsSection(vm: TesterViewModel) {
     val ctx = LocalContext.current
     var tab by remember { mutableStateOf(0) }
     var actionIdx by remember { mutableStateOf<Int?>(null) }
-    val order = if (tab == 0) vm.allOrder else vm.workingOrder
+    val order = vm.workingOrder   // sort + the list now apply only to the Working tab
 
     Card(colors = CardDefaults.cardColors(containerColor = Card), shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { shareText(ctx, vm.workingLinks()) }) {
-                    Text("Share working (${vm.workingOrder.size})", color = Green, fontSize = 13.sp)
+                TextButton(
+                    onClick = {
+                        val n = vm.workingOrder.size
+                        copyText(ctx, vm.workingLinks())
+                        Toast.makeText(
+                            ctx,
+                            if (n > 0) "Copied $n working config" + (if (n == 1) "" else "s") else "No working configs",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("Copy working (${vm.workingOrder.size})", color = Green, fontSize = 13.sp)
+                }
+                TextButton(
+                    onClick = { shareText(ctx, vm.workingLinks()) },
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text("Share", color = Green, fontSize = 13.sp)
                 }
                 Spacer(Modifier.weight(1f))
                 Text("sort:", color = Muted, fontSize = 11.sp)
@@ -74,13 +94,17 @@ fun ResultsSection(vm: TesterViewModel) {
             }
             TabRow(selectedTabIndex = tab, containerColor = Card2, contentColor = Green) {
                 Tab(selected = tab == 0, onClick = { tab = 0 },
-                    text = { Text("All (${vm.allOrder.size})") })
+                    text = { Text("Info") })
                 Tab(selected = tab == 1, onClick = { tab = 1 },
                     text = { Text("Working ✓ (${vm.workingOrder.size})") })
             }
-            LazyColumn(Modifier.fillMaxSize()) {
-                itemsIndexed(order, key = { _, idx -> idx }) { pos, idx ->
-                    ResultRow(pos + 1, idx, vm) { actionIdx = idx }
+            if (tab == 0) {
+                InfoSection(vm)
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    itemsIndexed(order, key = { _, idx -> idx }) { pos, idx ->
+                        ResultRow(pos + 1, idx, vm) { actionIdx = idx }
+                    }
                 }
             }
         }
@@ -89,6 +113,75 @@ fun ResultsSection(vm: TesterViewModel) {
     actionIdx?.let { idx ->
         RowActionDialog(vm, idx, ctx) { actionIdx = null }
     }
+}
+
+private data class InfoStats(
+    val loaded: Int, val tested: Int, val pending: Int, val online: Int,
+    val timeout: Int, val failed: Int, val unsupported: Int, val error: Int,
+    val skipped: Int, val bestLatency: Int?, val countries: List<Pair<String, Int>>,
+)
+
+/** Summary dashboard shown in place of the old "All" list — derived live from results. */
+@Composable
+private fun InfoSection(vm: TesterViewModel) {
+    val stats by remember {
+        derivedStateOf {
+            var online = 0; var timeout = 0; var failed = 0
+            var unsupported = 0; var error = 0; var pending = 0
+            var best: Int? = null
+            val countries = HashMap<String, Int>()
+            for (r in vm.results.values) {
+                when (r.status) {
+                    Status.OK -> {
+                        online++
+                        r.latency?.let { l -> best = best?.let { minOf(it, l) } ?: l }
+                        if (r.country.isNotEmpty()) countries[r.country] = (countries[r.country] ?: 0) + 1
+                    }
+                    Status.TIMEOUT -> timeout++
+                    Status.FAILED -> failed++
+                    Status.UNSUPPORTED -> unsupported++
+                    Status.ERROR -> error++
+                    Status.PENDING -> pending++
+                }
+            }
+            InfoStats(
+                loaded = vm.nodes.size,
+                tested = online + timeout + failed + unsupported + error,
+                pending = pending, online = online, timeout = timeout, failed = failed,
+                unsupported = unsupported, error = error, skipped = vm.skipped.value,
+                bestLatency = best,
+                countries = countries.entries.sortedByDescending { it.value }.map { it.key to it.value },
+            )
+        }
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 8.dp, start = 4.dp, end = 4.dp)) {
+        StatRow("Loaded", stats.loaded.toString(), Fg)
+        StatRow("Tested", stats.tested.toString() + if (stats.pending > 0) "  (+${stats.pending} testing…)" else "", Fg)
+        StatRow("Online", stats.online.toString(), Green)
+        StatRow("Timeout", stats.timeout.toString(), WarnFg)
+        StatRow("Failed", stats.failed.toString(), BadFg)
+        if (stats.unsupported > 0) StatRow("Unsupported", stats.unsupported.toString(), WarnFg)
+        if (stats.error > 0) StatRow("Error", stats.error.toString(), BadFg)
+        StatRow("Dead (skipped)", stats.skipped.toString(), Muted)
+        stats.bestLatency?.let { StatRow("Best latency", "$it ms", Green) }
+        if (stats.countries.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text("Exit countries", color = Muted, fontSize = 12.sp)
+            Spacer(Modifier.height(2.dp))
+            stats.countries.take(8).forEach { (cc, n) -> StatRow(cc, n.toString(), Fg) }
+        }
+    }
+}
+
+@Composable
+private fun StatRow(label: String, value: String, valueColor: Color) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Muted, fontSize = 13.sp)
+        Spacer(Modifier.weight(1f))
+        Text(value, color = valueColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+    HorizontalDivider(color = Stroke.copy(alpha = 0.25f))
 }
 
 @Composable
