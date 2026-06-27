@@ -1,5 +1,3 @@
-# V2Ray subscription URLs — one per line. Lines starting with # are ignored.
-# Edit freely in the app (Load from Subscription). Verified-active aggregators:
 https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_base64_Sub.txt
 https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt
 https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/super-sub.txt

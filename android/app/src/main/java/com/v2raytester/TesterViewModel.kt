@@ -20,6 +20,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -58,6 +59,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     private var stopFlag = AtomicBoolean(false)
     private var runJob: Job? = null
     private var fetchGen = 0
+    private val MAX_CONFIGS = 30000   // mobile memory guard for huge aggregator subs
 
     // counters (mutated only on the single Main consumer)
     private var pingDone = 0; private var pingReach = 0; private var pingTotal = 0
@@ -72,7 +74,11 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch(Dispatchers.Main) {
             settings.value = prefs.settings.first()
-            subUrlsText.value = subs.urlsText()
+            // show only URLs in the editor (drop seeded #/// comment + blank lines)
+            subUrlsText.value = subs.urlsText().lineSequence()
+                .map { it.trimEnd() }
+                .filter { val t = it.trim(); t.isNotEmpty() && !t.startsWith("#") && !t.startsWith("//") }
+                .joinToString("\n")
         }
         // single consumer applies engine events to Compose state safely
         viewModelScope.launch(Dispatchers.Main) {
@@ -125,7 +131,8 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------- testing
     fun startTests() {
         if (testing.value) return
-        val ns = parse()
+        // manual paste re-parses the box; a subscription fetch already populated `nodes`
+        val ns = if (configText.value.isNotBlank()) parse() else nodes.toList()
         if (ns.isEmpty()) { status.value = "no configs to test"; return }
         results.clear(); allOrder.clear(); workingOrder.clear()
         pingDone = 0; pingReach = 0; testDone = 0; okCount = 0; skipped = 0
@@ -276,25 +283,44 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         fetchGen++; val gen = fetchGen
         fetching.value = true; subProgress.value = 0f
         viewModelScope.launch(Dispatchers.IO) {
-            val gathered = StringBuilder(); var ok = 0; var configs = 0
-            for ((i, u) in urls.withIndex()) {
+            // Parse INCREMENTALLY off the main thread, dedupe on the fly, and cap
+            // the total. Aggregator subs can hold 250k+ configs; materializing all
+            // of them (or dumping them into a TextField) OOM-crashes a phone.
+            val collected = ArrayList<Node>()
+            val seen = HashSet<String>()
+            var ok = 0
+            var capped = false
+            loop@ for ((i, u) in urls.withIndex()) {
                 if (gen != fetchGen) return@launch
                 val links = subs.fetchOne(u)
                 if (links.isNotEmpty()) {
-                    gathered.append(links).append("\n"); ok++
-                    configs += links.count { it == '\n' } + 1
+                    ok++
+                    for (line in links.lineSequence()) {
+                        val l = line.trim()
+                        if (l.isEmpty() || l.startsWith("#") || l.startsWith("//")) continue
+                        val n = try { ShareLinks.parseLink(l) } catch (e: Exception) { null } ?: continue
+                        if (seen.add(n.dedupeKey)) {
+                            collected.add(n)
+                            if (collected.size >= MAX_CONFIGS) { capped = true; break@loop }
+                        }
+                    }
                 }
                 val done = i + 1
-                viewModelScope.launch(Dispatchers.Main) {
+                withContext(Dispatchers.Main) {
                     if (gen == fetchGen) {
                         subProgress.value = done.toFloat() / urls.size
-                        subStatus.value = "$done/${urls.size} fetched · $ok ok · $configs configs"
+                        subStatus.value = "$done/${urls.size} fetched · $ok ok · ${collected.size} configs"
                     }
                 }
             }
-            if (gen == fetchGen) viewModelScope.launch(Dispatchers.Main) {
-                setLinks(gathered.toString(), append = false)
-                parse()
+            if (gen != fetchGen) return@launch
+            withContext(Dispatchers.Main) {
+                nodes.clear(); nodes.addAll(collected)
+                configText.value = ""          // don't dump megabytes into the box
+                results.clear(); allOrder.clear(); workingOrder.clear()
+                val msg = "${collected.size} configs loaded" + if (capped) " (capped at $MAX_CONFIGS)" else ""
+                status.value = msg
+                subStatus.value = msg
                 fetching.value = false
             }
         }
