@@ -85,6 +85,9 @@ data class TestResult(
 data class Settings(
     val testUrl: String = DEFAULT_URL,
     val timeoutSec: Int = 8,
+    // Pass A just needs yes/no — a working proxy answers in <2s, only broken ones burn the
+    // full window, so a shorter connectivity timeout clears the dead tail much faster.
+    val connectTimeoutSec: Int = 5,
     val concurrency: Int = 16,
     val geo: Boolean = true,
     val prefilter: Boolean = true,

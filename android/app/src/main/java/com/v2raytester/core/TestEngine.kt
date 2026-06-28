@@ -24,7 +24,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Test engine — Kotlin port of tester.py for Android.
@@ -255,23 +254,6 @@ class TestEngine(
         } catch (e: Exception) { try { proc.destroyForcibly() } catch (_: Exception) {} }
     }
 
-    // ip-api.com is ~45 req/min per source IP. Geo runs only in the (small) refine pass,
-    // but several working configs can share an exit IP, so space geo calls out globally.
-    private val geoSpacingMs = 1400L   // ip-api.com allows ~45/min → ~1.4s spacing
-    private val geoNextAllowed = AtomicLong(0L)
-    private fun geoThrottle() {
-        while (true) {
-            val now = System.currentTimeMillis()
-            val prev = geoNextAllowed.get()
-            val slot = maxOf(now, prev)
-            if (geoNextAllowed.compareAndSet(prev, slot + geoSpacingMs)) {
-                val wait = slot - now
-                if (wait > 0) try { Thread.sleep(wait) } catch (_: InterruptedException) {}
-                return
-            }
-        }
-    }
-
     /** One latency sample through the proxy. Returns (httpCode, ms); code 0 = timeout/IO. */
     private fun httpSample(client: OkHttpClient, url: String): Pair<Int, Int?> = try {
         val t0 = System.nanoTime()
@@ -311,7 +293,8 @@ class TestEngine(
                 ) to proc.isAlive   // retry only if it was still alive (transient)
             }
 
-            val client = socksClient(port, settings.timeoutSec)
+            // Pass A uses the shorter connectivity timeout; the refine pass uses the full one.
+            val client = socksClient(port, if (refine) settings.timeoutSec else settings.connectTimeoutSec)
             val (code, ms0) = httpSample(client, settings.testUrl)
             when {
                 code == 204 -> {
@@ -328,7 +311,9 @@ class TestEngine(
                         if (samples.isNotEmpty()) latency = median(samples)
                     }
                     if (!refine) return TestResult(node, Status.OK, latency = latency) to false
-                    val (ip, cc) = if (settings.geo) { geoThrottle(); geoLookup(port, settings.timeoutSec) } else "" to ""
+                    // geo is best-effort, bounded by the low refine concurrency (no global
+                    // throttle — exit IPs vary, so ip-api's per-IP limit is rarely an issue).
+                    val (ip, cc) = if (settings.geo) geoLookup(port, settings.timeoutSec) else "" to ""
                     val reach = if (settings.reachEnabled) reachAll(port, settings, stop) else emptyMap()
                     return TestResult(node, Status.OK, latency = latency, exitIp = ip, country = cc, reach = reach) to false
                 }

@@ -400,6 +400,7 @@ class App(ctk.CTk):
         return {
             "url": self.url_var.get().strip() or DEFAULT_URL,
             "timeout": int(self.timeout_var.get()),
+            "connect_timeout": 5,      # Pass A connectivity timeout (refine uses full timeout)
             "concurrency": threads,
             "geo": bool(self.geo_var.get()),
             "prefilter": bool(self.prefilter_var.get()),
