@@ -26,7 +26,8 @@ class Subscriptions(private val context: Context, private val http: OkHttpClient
 
     fun urls(): List<String> = urlsText().lineSequence()
         .map { it.trim() }
-        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        // match the editor's display filter (TesterViewModel) + stripComments: skip both # and //
+        .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
         .toList()
 
     /** Fetch + decode a single subscription URL ('' on failure). */

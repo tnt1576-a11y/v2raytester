@@ -198,14 +198,27 @@ class TestEngine(
     }
 
     // --------------------------------------------------------------- full test
+    // One template client; every per-test client is spun off it via newBuilder() so they
+    // SHARE a single Dispatcher + ConnectionPool instead of each allocating its own thread
+    // pool. The proxy/timeouts are client-level so they're still set per test below.
+    // The dispatcher caps are lifted because real concurrency is bounded by the coroutine
+    // dispatchers (limitedParallelism); OkHttp's default maxRequestsPerHost=5 would
+    // otherwise throttle the Pass-A 204 checks (all hit the same test host) to 5 at a time.
+    private val baseClient: OkHttpClient = OkHttpClient.Builder()
+        .retryOnConnectionFailure(false)
+        .build()
+        .also {
+            it.dispatcher.maxRequests = 4096
+            it.dispatcher.maxRequestsPerHost = 4096
+        }
+
     private fun socksClient(port: Int, timeoutSec: Int): OkHttpClient =
-        OkHttpClient.Builder()
+        baseClient.newBuilder()
             // OkHttp does remote DNS for SOCKS proxies (resolves at the exit, not locally)
             .proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port)))
             .connectTimeout(timeoutSec.toLong(), TimeUnit.SECONDS)
             .readTimeout(timeoutSec.toLong(), TimeUnit.SECONDS)
             .callTimeout((timeoutSec + 3).toLong(), TimeUnit.SECONDS)
-            .retryOnConnectionFailure(false)
             .build()
 
     private fun waitReady(port: Int, proc: Process, timeoutMs: Int, stop: () -> Boolean): Boolean {
