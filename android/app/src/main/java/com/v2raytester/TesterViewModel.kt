@@ -47,7 +47,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     val workingOrder: SnapshotStateList<Int> = mutableStateListOf()
 
     val status = mutableStateOf("")
-    val phase = mutableStateOf("idle")          // idle | ping | test
+    val phase = mutableStateOf("idle")          // idle | ping | test | refine
     val progress = mutableStateOf(0f)
     val testing = mutableStateOf(false)
 
@@ -63,11 +63,13 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     // counters (mutated only on the single Main consumer)
     private var pingDone = 0; private var pingReach = 0; private var pingTotal = 0
     private var testDone = 0; private var testTotal = 0; private var okCount = 0
+    private var refineTotal = 0; private var refineDone = 0
     val skipped = mutableStateOf(0)   // prefilter-dropped (dead) count, surfaced on the Info tab
 
     private sealed class Ev {
         data class Ping(val idx: Int, val ms: Int?) : Ev()
-        data class Result(val idx: Int, val r: TestResult) : Ev()
+        data class Result(val idx: Int, val r: TestResult, val refined: Boolean) : Ev()
+        data class Refine(val count: Int) : Ev()   // Pass A done; refining `count` working configs
     }
     private val events = Channel<Ev>(Channel.UNLIMITED)
 
@@ -146,6 +148,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         if (ns.isEmpty()) { status.value = "no configs to test"; return }
         results.clear(); allOrder.clear(); workingOrder.clear()
         pingDone = 0; pingReach = 0; testDone = 0; okCount = 0; skipped.value = 0
+        refineTotal = 0; refineDone = 0
         stopFlag = AtomicBoolean(false)
         testing.value = true
         openWorkFile()
@@ -178,7 +181,8 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 allOrder.addAll(indices)
                 engine.runTests(
                     ns, s, indices, pings,
-                    onResult = { i, r -> events.trySend(Ev.Result(i, r)) },
+                    onResult = { i, r, refined -> events.trySend(Ev.Result(i, r, refined)) },
+                    onRefineStart = { n -> events.trySend(Ev.Refine(n)) },
                     stop = stop,
                 )
             } finally {
@@ -200,7 +204,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         if (testing.value) return
         viewModelScope.launch(Dispatchers.IO) {
             val r = engine.testNode(nodes[idx], settings.value, { false }, knownPing = null)
-            events.trySend(Ev.Result(idx, r))
+            events.trySend(Ev.Result(idx, r, refined = false))
         }
     }
 
@@ -227,20 +231,38 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             is Ev.Result -> {
-                results[e.idx] = e.r
-                if (!allOrder.contains(e.idx)) allOrder.add(e.idx)
-                testDone++
-                if (e.r.status == Status.OK) {
-                    okCount++
-                    if (!workingOrder.contains(e.idx)) {
-                        workingOrder.add(e.idx)
-                        appendWorkFile(e.r.node.raw)
+                if (e.refined) {
+                    // Pass B: the config already passed Pass A. Apply the accurate latency +
+                    // geo + Sites only if the refine also succeeded; if the refine hiccuped
+                    // (transient timeout), KEEP the Pass A working row rather than dropping a
+                    // confirmed-working config.
+                    refineDone++
+                    if (e.r.status == Status.OK) results[e.idx] = e.r
+                    if (phase.value == "refine") {
+                        progress.value = refineDone.toFloat() / refineTotal.coerceAtLeast(1)
+                        status.value = "refining $refineDone/$refineTotal · ✓ $okCount online"
                     }
-                } else if (workingOrder.contains(e.idx)) {
-                    workingOrder.remove(e.idx)   // retest flipped to failure
+                } else {
+                    results[e.idx] = e.r
+                    if (!allOrder.contains(e.idx)) allOrder.add(e.idx)
+                    testDone++
+                    if (e.r.status == Status.OK) {
+                        okCount++
+                        if (!workingOrder.contains(e.idx)) {
+                            workingOrder.add(e.idx)
+                            appendWorkFile(e.r.node.raw)
+                        }
+                    } else if (workingOrder.contains(e.idx)) {
+                        workingOrder.remove(e.idx)   // retest flipped to failure
+                    }
+                    if (phase.value == "test") progress.value = testDone.toFloat() / testTotal.coerceAtLeast(1)
+                    updateCounts()
                 }
-                if (phase.value == "test") progress.value = testDone.toFloat() / testTotal.coerceAtLeast(1)
-                updateCounts()
+            }
+            is Ev.Refine -> {
+                phase.value = "refine"; refineTotal = e.count; refineDone = 0; progress.value = 0f
+                status.value = if (e.count > 0) "refining 0/${e.count} · ✓ $okCount online"
+                               else "✓ $okCount online · ${testDone}/${testTotal} tested"
             }
         }
     }
