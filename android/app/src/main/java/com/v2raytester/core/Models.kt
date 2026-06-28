@@ -92,5 +92,9 @@ data class Settings(
     val reachTargets: List<ReachTarget> = DEFAULT_REACH_TARGETS,
     val pingConcurrency: Int = 1000,   // NIO non-blocking connects: ~all in flight on one thread
     val pingTimeoutSec: Int = 2,
-    val startTimeoutSec: Int = 3,
+    val startTimeoutSec: Int = 5,      // higher: many cores boot at once under load
+    // Pass B (refine): re-measure the working subset at LOW concurrency with several
+    // samples for accurate, contention-free latency, then geo + Sites.
+    val latencySamples: Int = 3,
+    val refineConcurrency: Int = 4,
 )

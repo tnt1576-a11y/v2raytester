@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Test engine — Kotlin port of tester.py for Android.
@@ -254,8 +255,41 @@ class TestEngine(
         } catch (e: Exception) { try { proc.destroyForcibly() } catch (_: Exception) {} }
     }
 
-    /** One core spawn + latency request. Returns (result, retryable). */
-    private fun proxyAttempt(node: Node, settings: Settings, stop: () -> Boolean): Pair<TestResult, Boolean> {
+    // ip-api.com is ~45 req/min per source IP. Geo runs only in the (small) refine pass,
+    // but several working configs can share an exit IP, so space geo calls out globally.
+    private val geoSpacingMs = 1400L   // ip-api.com allows ~45/min → ~1.4s spacing
+    private val geoNextAllowed = AtomicLong(0L)
+    private fun geoThrottle() {
+        while (true) {
+            val now = System.currentTimeMillis()
+            val prev = geoNextAllowed.get()
+            val slot = maxOf(now, prev)
+            if (geoNextAllowed.compareAndSet(prev, slot + geoSpacingMs)) {
+                val wait = slot - now
+                if (wait > 0) try { Thread.sleep(wait) } catch (_: InterruptedException) {}
+                return
+            }
+        }
+    }
+
+    /** One latency sample through the proxy. Returns (httpCode, ms); code 0 = timeout/IO. */
+    private fun httpSample(client: OkHttpClient, url: String): Pair<Int, Int?> = try {
+        val t0 = System.nanoTime()
+        client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+            resp.code to ((System.nanoTime() - t0) / 1_000_000).toInt()
+        }
+    } catch (e: java.net.SocketTimeoutException) { 0 to null
+    } catch (e: IOException) { 0 to null }
+
+    internal fun median(xs: List<Int>): Int {
+        val s = xs.sorted(); val n = s.size
+        return if (n % 2 == 1) s[n / 2] else (s[n / 2 - 1] + s[n / 2]) / 2
+    }
+
+    /** One core spawn + latency request. In [refine] mode it takes several latency
+     *  samples (median) and runs geo + Sites; otherwise it's a single fast 204 check
+     *  (no geo/Sites). Returns (result, retryable). */
+    private fun proxyAttempt(node: Node, settings: Settings, stop: () -> Boolean, refine: Boolean): Pair<TestResult, Boolean> {
         val port = freePort()
         val cfgFile = File(workDir, "cfg_$port.json")
         val errFile = File(workDir, "err_$port.log")
@@ -278,24 +312,28 @@ class TestEngine(
             }
 
             val client = socksClient(port, settings.timeoutSec)
-            val t0 = System.nanoTime()
-            try {
-                client.newCall(Request.Builder().url(settings.testUrl).build()).execute().use { resp ->
-                    val ms = ((System.nanoTime() - t0) / 1_000_000).toInt()
-                    if (resp.code == 204) {
-                        val (ip, cc) = if (settings.geo) geoLookup(port, settings.timeoutSec) else "" to ""
-                        val reach = if (settings.reachEnabled) reachAll(port, settings, stop) else emptyMap()
-                        return TestResult(
-                            node, Status.OK, latency = ms,
-                            exitIp = ip, country = cc, reach = reach
-                        ) to false
+            val (code, ms0) = httpSample(client, settings.testUrl)
+            when {
+                code == 204 -> {
+                    var latency = ms0
+                    if (refine && settings.latencySamples > 1) {
+                        val samples = ArrayList<Int>()
+                        ms0?.let { samples.add(it) }
+                        repeat(settings.latencySamples - 1) {
+                            if (!stop()) {
+                                val (c, m) = httpSample(client, settings.testUrl)
+                                if (c == 204 && m != null) samples.add(m)
+                            }
+                        }
+                        if (samples.isNotEmpty()) latency = median(samples)
                     }
-                    return TestResult(node, Status.FAILED, latency = ms, message = "HTTP ${resp.code}") to false
+                    if (!refine) return TestResult(node, Status.OK, latency = latency) to false
+                    val (ip, cc) = if (settings.geo) { geoThrottle(); geoLookup(port, settings.timeoutSec) } else "" to ""
+                    val reach = if (settings.reachEnabled) reachAll(port, settings, stop) else emptyMap()
+                    return TestResult(node, Status.OK, latency = latency, exitIp = ip, country = cc, reach = reach) to false
                 }
-            } catch (e: java.net.SocketTimeoutException) {
-                return TestResult(node, Status.TIMEOUT, message = "timed out") to false
-            } catch (e: IOException) {
-                return TestResult(node, Status.TIMEOUT, message = "no response", detail = e.message ?: "") to false
+                code == 0 -> return TestResult(node, Status.TIMEOUT, message = "no response") to false
+                else -> return TestResult(node, Status.FAILED, latency = ms0, message = "HTTP $code") to false
             }
         } catch (e: Exception) {
             return TestResult(node, Status.ERROR, message = e.message ?: "error") to false
@@ -307,36 +345,74 @@ class TestEngine(
         }
     }
 
-    /** Test a single node (never throws). [knownPing] reuses the prefilter ping. */
+    /** Pass A: fast connectivity check (single 204, no geo/Sites). [knownPing] reuses the prefilter ping. */
+    fun testConnect(node: Node, settings: Settings, stop: () -> Boolean, knownPing: Int? = null): TestResult {
+        if (stop()) return TestResult(node, Status.ERROR, message = "stopped")
+        val ping = knownPing ?: tcpPing(node.server, node.port, settings.pingTimeoutSec * 1000)
+        if (!XrayConfig.isSupported(node.type)) {
+            return TestResult(node, Status.UNSUPPORTED, message = "unsupported", tcpPing = ping)
+        }
+        var (res, retry) = proxyAttempt(node, settings, stop, refine = false)
+        if (retry && !stop()) res = proxyAttempt(node, settings, stop, refine = false).first
+        return res.copy(tcpPing = ping)
+    }
+
+    /** Pass B: accurate re-measure of a working node — median latency + geo + Sites. */
+    fun refineNode(node: Node, settings: Settings, stop: () -> Boolean, knownPing: Int? = null): TestResult =
+        proxyAttempt(node, settings, stop, refine = true).first.copy(tcpPing = knownPing)
+
+    /** Full single test (connectivity + refine in one) — used for manual retest. */
     fun testNode(node: Node, settings: Settings, stop: () -> Boolean, knownPing: Int? = null): TestResult {
         if (stop()) return TestResult(node, Status.ERROR, message = "stopped")
         val ping = knownPing ?: tcpPing(node.server, node.port, settings.pingTimeoutSec * 1000)
         if (!XrayConfig.isSupported(node.type)) {
             return TestResult(node, Status.UNSUPPORTED, message = "unsupported", tcpPing = ping)
         }
-        var (res, retry) = proxyAttempt(node, settings, stop)
-        if (retry && !stop()) res = proxyAttempt(node, settings, stop).first
+        var (res, retry) = proxyAttempt(node, settings, stop, refine = true)
+        if (retry && !stop()) res = proxyAttempt(node, settings, stop, refine = true).first
         return res.copy(tcpPing = ping)
     }
 
-    /** Test [indices] with bounded concurrency, streaming each result via [onResult]. */
+    /**
+     * Two-pass test of [indices]:
+     *  - Pass A (concurrency): fast connectivity check, streamed via [onResult] (refined=false).
+     *    The working set is collected.
+     *  - Pass B (refineConcurrency): re-measure the working subset for accurate latency + geo +
+     *    Sites, streamed via [onResult] (refined=true). [onRefineStart] fires with the working
+     *    count between the passes.
+     */
     suspend fun runTests(
         nodes: List<Node>,
         settings: Settings,
         indices: List<Int>,
         pings: Map<Int, Int?>,
-        onResult: (Int, TestResult) -> Unit,
+        onResult: (Int, TestResult, Boolean) -> Unit,
+        onRefineStart: (Int) -> Unit,
         stop: () -> Boolean,
     ) = coroutineScope {
-        // Each test spawns an xray process; Dispatchers.IO caps blocking threads at ~64,
-        // so honor the chosen concurrency explicitly via limitedParallelism. (Very high
-        // values mean many concurrent xray processes — fast, but heavier on RAM and can
-        // inflate latency / cause false failures on a phone.)
-        val disp = Dispatchers.IO.limitedParallelism(settings.concurrency.coerceAtLeast(1))
+        // Pass A — connectivity at the chosen (high) concurrency. limitedParallelism is
+        // required because each test blocks a thread (xray spawn) and Dispatchers.IO caps at ~64.
+        val working = Collections.synchronizedList(ArrayList<Int>())
+        val dispA = Dispatchers.IO.limitedParallelism(settings.concurrency.coerceAtLeast(1))
         indices.map { idx ->
-            async(disp) {
+            async(dispA) {
                 if (stop()) return@async
-                onResult(idx, testNode(nodes[idx], settings, stop, pings[idx]))
+                val r = testConnect(nodes[idx], settings, stop, pings[idx])
+                if (r.status == Status.OK) working.add(idx)
+                onResult(idx, r, false)
+            }
+        }.awaitAll()
+
+        // Pass B — refine the working subset at LOW concurrency for clean, accurate latency.
+        if (stop()) return@coroutineScope
+        val workIdx = working.sorted()
+        onRefineStart(workIdx.size)
+        if (workIdx.isEmpty()) return@coroutineScope
+        val dispB = Dispatchers.IO.limitedParallelism(settings.refineConcurrency.coerceAtLeast(1))
+        workIdx.map { idx ->
+            async(dispB) {
+                if (stop()) return@async
+                onResult(idx, refineNode(nodes[idx], settings, stop, pings[idx]), true)
             }
         }.awaitAll()
     }
