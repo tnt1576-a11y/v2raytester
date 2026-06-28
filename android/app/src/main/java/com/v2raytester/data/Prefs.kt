@@ -62,13 +62,16 @@ class Prefs(private val context: Context) {
     }
 
     private fun decodeTargets(json: String?): List<ReachTarget> {
-        if (json.isNullOrBlank()) return DEFAULT_REACH_TARGETS
+        // null = never set -> seed defaults. "[]" = user explicitly cleared the list ->
+        // honor the empty list (don't silently resurrect the defaults).
+        if (json == null) return DEFAULT_REACH_TARGETS
+        if (json.isBlank()) return emptyList()
         return try {
             val arr = JSONArray(json)
             (0 until arr.length()).map {
                 val t = arr.getJSONArray(it)
                 ReachTarget(t.getString(0), t.getString(1))
-            }.ifEmpty { DEFAULT_REACH_TARGETS }
+            }
         } catch (e: Exception) { DEFAULT_REACH_TARGETS }
     }
 }
