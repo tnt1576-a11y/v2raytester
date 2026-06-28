@@ -165,23 +165,6 @@ def _geo_lookup(port, max_time):
         return "", ""
 
 
-# ip-api.com is ~45 req/min per source IP. Geo runs only in the (small) refine pass,
-# but several working configs can share an exit IP, so space geo calls out globally.
-_GEO_SPACING = 1.4   # ip-api.com allows ~45/min -> ~1.4s spacing
-_geo_lock = threading.Lock()
-_geo_next = [0.0]
-
-
-def _geo_throttle():
-    with _geo_lock:
-        now = time.monotonic()
-        slot = max(now, _geo_next[0])
-        _geo_next[0] = slot + _GEO_SPACING
-    wait = slot - now
-    if wait > 0:
-        time.sleep(wait)
-
-
 def _median(xs):
     s = sorted(xs)
     n = len(s)
@@ -303,7 +286,9 @@ def _proxy_attempt(node, path, settings, stop_event, refine=False):
             return _result(node, FAILED, message=msg, detail=detail), (proc.poll() is None)
 
         url = settings.get("url", "http://www.gstatic.com/generate_204")
-        max_time = settings.get("timeout", 8)
+        # Pass A just needs yes/no, so use the shorter connectivity timeout; the refine
+        # pass uses the full timeout for an accurate measurement.
+        max_time = settings.get("timeout", 8) if refine else settings.get("connect_timeout", 5)
         code, latency = _curl_sample(port, url, max_time)
         cdetail = _read_file(err_file)
         if code == "TIMEOUT":
@@ -323,7 +308,8 @@ def _proxy_attempt(node, path, settings, stop_event, refine=False):
                 return _result(node, OK, latency=latency), False   # Pass A: no geo/Sites
             ip, cc = ("", "")
             if settings.get("geo"):
-                _geo_throttle()
+                # best-effort, bounded by the low refine concurrency (no global throttle —
+                # exit IPs vary, so ip-api's per-IP limit is rarely hit)
                 ip, cc = _geo_lookup(port, max_time)
             reach = _reach_all(port, settings, stop_event)  # core still alive
             return _result(node, OK, latency=latency, exit_ip=ip, country=cc, reach=reach), False
