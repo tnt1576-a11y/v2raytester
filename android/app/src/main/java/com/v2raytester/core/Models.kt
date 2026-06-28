@@ -90,7 +90,7 @@ data class Settings(
     val prefilter: Boolean = true,
     val reachEnabled: Boolean = true,
     val reachTargets: List<ReachTarget> = DEFAULT_REACH_TARGETS,
-    val pingConcurrency: Int = 256,
+    val pingConcurrency: Int = 1000,   // NIO non-blocking connects: ~all in flight on one thread
     val pingTimeoutSec: Int = 2,
     val startTimeoutSec: Int = 3,
 )

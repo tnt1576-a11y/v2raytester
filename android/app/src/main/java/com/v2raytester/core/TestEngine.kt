@@ -4,6 +4,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -14,9 +16,14 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
+import java.nio.channels.SocketChannel
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Test engine — Kotlin port of tester.py for Android.
@@ -73,8 +80,14 @@ class TestEngine(
         return ServerSocket(0).use { it.localPort }
     }
 
-    /** Endpoint-deduped async TCP ping prefilter. Calls [onPing] for every node;
-     *  returns the sorted reachable indices. */
+    /** Endpoint-deduped TCP-connect prefilter. Calls [onPing] for every node;
+     *  returns the sorted reachable indices.
+     *
+     *  Non-blocking NIO: up to pingConcurrency connects are in flight at once on a
+     *  single selector thread. The old version used blocking connects, so it needed a
+     *  thread per connect — Dispatchers.IO's ~64-thread ceiling silently capped real
+     *  concurrency at 64, and a run of dead/timing-out endpoints (each holding its
+     *  thread for the full timeout) stalled the whole sweep ("fast at first, then slow"). */
     suspend fun pingFilter(
         nodes: List<Node>,
         settings: Settings,
@@ -83,21 +96,104 @@ class TestEngine(
     ): List<Int> = coroutineScope {
         val groups = LinkedHashMap<Pair<String, Int>, MutableList<Int>>()
         nodes.forEachIndexed { i, n -> groups.getOrPut(n.server to n.port) { mutableListOf() }.add(i) }
+        val groupList = groups.entries.toList()
         val reachable = Collections.synchronizedList(ArrayList<Int>())
-        // tcpPing blocks a thread, and Dispatchers.IO only grows to ~64 threads — which
-        // silently capped real ping concurrency at 64 no matter how high pingConcurrency
-        // was. limitedParallelism gives the full configured width, so the prefilter
-        // actually runs pingConcurrency-wide (the slow part of a big run).
-        val disp = Dispatchers.IO.limitedParallelism(settings.pingConcurrency.coerceAtLeast(1))
-        groups.entries.map { (ep, idxs) ->
-            async(disp) {
-                val ms = if (stop()) null else tcpPing(ep.first, ep.second, settings.pingTimeoutSec * 1000)
-                for (i in idxs) {
-                    if (ms != null) reachable.add(i)
-                    onPing(i, ms)
-                }
+
+        // finish() runs only on the single selector thread below, so the caller's
+        // per-index bookkeeping (onPing) is never invoked concurrently.
+        fun finish(gi: Int, ms: Int?) {
+            for (i in groupList[gi].value) {
+                if (ms != null) reachable.add(i)
+                onPing(i, ms)
             }
-        }.awaitAll()
+        }
+
+        // DNS (blocking getByName) runs CONCURRENTLY with the connect scan, feeding
+        // resolved endpoints into a queue, so connects start as soon as the first names
+        // resolve instead of waiting for the whole list — DNS and connects overlap.
+        val addrs = arrayOfNulls<InetSocketAddress>(groupList.size)
+        val resolvedQ = ConcurrentLinkedQueue<Int>()        // group indices ready to connect
+        val produced = AtomicInteger(0)
+        val dnsDisp = Dispatchers.IO.limitedParallelism(128)
+        val resolverJob = launch {
+            groupList.mapIndexed { gi, e ->
+                async(dnsDisp) {
+                    if (!stop()) {
+                        val ip = resolve(e.key.first)
+                        if (ip != null && e.key.second in 1..65535) {
+                            try { addrs[gi] = InetSocketAddress(InetAddress.getByName(ip), e.key.second) } catch (_: Exception) {}
+                        }
+                    }
+                    resolvedQ.add(gi); produced.incrementAndGet()
+                }
+            }.awaitAll()
+        }
+
+        // Single-thread NIO selector loop: up to pingConcurrency connects in flight.
+        withContext(Dispatchers.IO) {
+            val timeoutNs = settings.pingTimeoutSec.coerceAtLeast(1) * 1_000_000_000L
+            val maxInFlight = settings.pingConcurrency.coerceAtLeast(1)
+            val selector = Selector.open()
+            val inflight = HashMap<SelectionKey, Triple<Int, Long, SocketChannel>>()
+            try {
+                while (true) {
+                    if (stop()) break
+                    // start connects for any resolved endpoints, up to the in-flight cap
+                    while (inflight.size < maxInFlight) {
+                        val gi = resolvedQ.poll() ?: break
+                        val addr = addrs[gi]
+                        if (addr == null) { finish(gi, null); continue }
+                        try {
+                            val ch = SocketChannel.open()
+                            ch.configureBlocking(false)
+                            val key = ch.register(selector, SelectionKey.OP_CONNECT)
+                            if (ch.connect(addr)) {          // connected immediately (e.g. loopback)
+                                key.cancel(); try { ch.close() } catch (_: Exception) {}
+                                finish(gi, 0)
+                            } else {
+                                inflight[key] = Triple(gi, System.nanoTime(), ch)
+                            }
+                        } catch (e: Exception) { finish(gi, null) }
+                    }
+                    if (inflight.isEmpty() && resolvedQ.isEmpty()) {
+                        if (produced.get() >= groupList.size) break   // all resolved + all connected
+                        Thread.sleep(15); continue                    // briefly wait for DNS to produce
+                    }
+                    if (inflight.isEmpty()) continue                  // queue has items: loop to connect them
+
+                    selector.select(200)
+                    val sel = selector.selectedKeys().iterator()
+                    while (sel.hasNext()) {
+                        val key = sel.next(); sel.remove()
+                        val tri = inflight.remove(key) ?: continue
+                        var ms: Int? = null
+                        try { if (tri.third.finishConnect()) ms = ((System.nanoTime() - tri.second) / 1_000_000).toInt() }
+                        catch (e: Exception) {}
+                        try { tri.third.close() } catch (_: Exception) {}
+                        key.cancel()
+                        finish(tri.first, ms)
+                    }
+                    if (inflight.isNotEmpty()) {
+                        val now = System.nanoTime()
+                        val expired = inflight.entries.filter { now - it.value.second >= timeoutNs }.map { it.key }
+                        for (k in expired) {
+                            val tri = inflight.remove(k)!!
+                            try { tri.third.close() } catch (_: Exception) {}
+                            k.cancel()
+                            finish(tri.first, null)
+                        }
+                    }
+                }
+                // stopped mid-scan: mark whatever was still in flight as unreachable
+                for ((k, tri) in inflight) {
+                    try { tri.third.close() } catch (_: Exception) {}
+                    k.cancel(); finish(tri.first, null)
+                }
+            } finally {
+                try { selector.close() } catch (_: Exception) {}
+            }
+        }
+        resolverJob.cancel()
         reachable.sorted()
     }
 
