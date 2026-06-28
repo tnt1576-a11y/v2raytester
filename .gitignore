@@ -53,6 +53,9 @@ working.txt
 *.spec
 _build.log
 
+# Claude Code project context (kept local, not published)
+CLAUDE.md
+
 # IDE
 .vscode/
 .idea/
