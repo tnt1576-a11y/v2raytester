@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,6 +54,10 @@ private fun shareText(ctx: Context, text: String) {
 private fun copyText(ctx: Context, text: String) {
     val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText("config", text))
+}
+
+private fun openUrl(ctx: Context, url: String) {
+    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
 }
 
 @Composable
@@ -124,6 +129,7 @@ private data class InfoStats(
 /** Summary dashboard shown in place of the old "All" list — derived live from results. */
 @Composable
 private fun InfoSection(vm: TesterViewModel) {
+    val ctx = LocalContext.current
     val stats by remember {
         derivedStateOf {
             var online = 0; var timeout = 0; var failed = 0
@@ -171,6 +177,25 @@ private fun InfoSection(vm: TesterViewModel) {
             Spacer(Modifier.height(2.dp))
             stats.countries.take(8).forEach { (cc, n) -> StatRow(cc, n.toString(), Fg) }
         }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider(color = Stroke.copy(alpha = 0.4f))
+        Spacer(Modifier.height(10.dp))
+        Text("⚠ Security notice", color = WarnFg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "These proxy servers are shared publicly over the internet — anyone can find " +
+                "and use them. We cannot guarantee the security or privacy of your connection. " +
+                "Use at your own risk and avoid sending sensitive data through them.",
+            color = Muted, fontSize = 12.sp, lineHeight = 17.sp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Contact: @AmirAlirshn",
+            color = Green, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clickable { openUrl(ctx, "https://t.me/AmirAlirshn") },
+        )
+        Spacer(Modifier.height(8.dp))
     }
 }
 
