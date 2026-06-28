@@ -17,7 +17,10 @@ import com.v2raytester.data.Prefs
 import com.v2raytester.data.Subscriptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -25,12 +28,19 @@ import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class TesterViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = Prefs(app)
     private val subHttp = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)   // hard cap so one hung URL can't stall the batch
+        .build()
+        // many subs share a host (raw.githubusercontent.com); OkHttp's default per-host cap
+        // of 5 would serialize concurrent fetches to it, so lift it.
+        .also { it.dispatcher.maxRequestsPerHost = 32 }
     private val subs = Subscriptions(app, subHttp)
     private val engine = TestEngine(
         xrayPath = app.applicationInfo.nativeLibraryDir + "/libxray.so",
@@ -328,34 +338,44 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         subs.saveUrlsText(subUrlsText.value)
         fetchGen++; val gen = fetchGen
         fetching.value = true; subProgress.value = 0f
+        subStatus.value = "fetching 0/${urls.size}…"
         viewModelScope.launch(Dispatchers.IO) {
-            // Parse INCREMENTALLY off the main thread and dedupe on the fly. No cap:
-            // we keep every unique config the subscriptions provide (the dedupe keeps
-            // the count down). Parsing stays off the main thread and configs never go
-            // into the TextField, so this won't freeze/OOM the UI the way a naive load
-            // would — but a giant aggregate will still use a lot of heap.
+            // Fetch URLs CONCURRENTLY (bounded) so one slow/dead aggregator can't stall the
+            // rest — previously this was a sequential loop and a single hung URL froze the
+            // whole batch for the full timeout. Parse + dedupe INCREMENTALLY off the main
+            // thread (merged under `lock`); configs never go into the TextField, so this
+            // won't freeze/OOM the UI — but a giant aggregate will still use a lot of heap.
             val collected = ArrayList<Node>()
             val seen = HashSet<String>()
-            var ok = 0
-            for ((i, u) in urls.withIndex()) {
-                if (gen != fetchGen) return@launch
-                val links = subs.fetchOne(u)
-                if (links.isNotEmpty()) {
-                    ok++
-                    for (line in links.lineSequence()) {
-                        val l = line.trim()
-                        if (l.isEmpty() || l.startsWith("#") || l.startsWith("//")) continue
-                        val n = try { ShareLinks.parseLink(l) } catch (e: Exception) { null } ?: continue
-                        if (seen.add(n.dedupeKey)) collected.add(n)
+            val lock = Any()
+            val done = AtomicInteger(0)
+            val ok = AtomicInteger(0)
+            val disp = Dispatchers.IO.limitedParallelism(16)
+            coroutineScope {
+                urls.map { u ->
+                    async(disp) {
+                        if (gen != fetchGen) return@async
+                        val links = subs.fetchOne(u)
+                        if (links.isNotEmpty()) {
+                            ok.incrementAndGet()
+                            for (line in links.lineSequence()) {
+                                val l = line.trim()
+                                if (l.isEmpty() || l.startsWith("#") || l.startsWith("//")) continue
+                                val n = try { ShareLinks.parseLink(l) } catch (e: Exception) { null } ?: continue
+                                synchronized(lock) { if (seen.add(n.dedupeKey)) collected.add(n) }
+                            }
+                        }
+                        val d = done.incrementAndGet()
+                        if (gen != fetchGen) return@async
+                        val c = synchronized(lock) { collected.size }
+                        withContext(Dispatchers.Main) {
+                            if (gen == fetchGen) {
+                                subProgress.value = d.toFloat() / urls.size
+                                subStatus.value = "$d/${urls.size} fetched · ${ok.get()} ok · $c configs"
+                            }
+                        }
                     }
-                }
-                val done = i + 1
-                withContext(Dispatchers.Main) {
-                    if (gen == fetchGen) {
-                        subProgress.value = done.toFloat() / urls.size
-                        subStatus.value = "$done/${urls.size} fetched · $ok ok · ${collected.size} configs"
-                    }
-                }
+                }.awaitAll()
             }
             if (gen != fetchGen) return@launch
             withContext(Dispatchers.Main) {
