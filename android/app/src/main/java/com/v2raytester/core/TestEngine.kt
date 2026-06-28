@@ -257,7 +257,7 @@ class TestEngine(
 
     // ip-api.com is ~45 req/min per source IP. Geo runs only in the (small) refine pass,
     // but several working configs can share an exit IP, so space geo calls out globally.
-    private val geoSpacingMs = 1000L
+    private val geoSpacingMs = 1400L   // ip-api.com allows ~45/min → ~1.4s spacing
     private val geoNextAllowed = AtomicLong(0L)
     private fun geoThrottle() {
         while (true) {

@@ -617,6 +617,10 @@ class App(ctk.CTk):
     def _apply_result(self, idx, res, refined=False):
         if refined:
             self._refine_done = getattr(self, "_refine_done", 0) + 1
+            # A refine that hiccups (transient timeout) must NOT drop a config Pass A
+            # already confirmed working — keep the Pass A row instead.
+            if res.get("status") != tester.OK:
+                return
         self.results[idx] = res
         iid = str(idx)
         status = res["status"]
@@ -649,6 +653,8 @@ class App(ctk.CTk):
                 self._work_iids.add(idx)
                 self.wtree.insert("", "end", iid=iid, values=values, tags=(tag,))
                 self._work_append(n.get("raw", ""))
+            elif self.wtree.exists(iid):
+                self.wtree.item(iid, values=values, tags=(tag,))  # refine: update accurate latency/geo/Sites
         elif idx in self._work_iids:  # retest flipped it to non-working
             self._work_iids.discard(idx)
             if self.wtree.exists(iid):

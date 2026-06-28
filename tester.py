@@ -167,7 +167,7 @@ def _geo_lookup(port, max_time):
 
 # ip-api.com is ~45 req/min per source IP. Geo runs only in the (small) refine pass,
 # but several working configs can share an exit IP, so space geo calls out globally.
-_GEO_SPACING = 1.0
+_GEO_SPACING = 1.4   # ip-api.com allows ~45/min -> ~1.4s spacing
 _geo_lock = threading.Lock()
 _geo_next = [0.0]
 

@@ -231,19 +231,19 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             is Ev.Result -> {
-                results[e.idx] = e.r
                 if (e.refined) {
-                    // Pass B: row already counted in Pass A; just refresh it with the
-                    // accurate latency + geo + Sites. Only adjust if it flipped to failure.
+                    // Pass B: the config already passed Pass A. Apply the accurate latency +
+                    // geo + Sites only if the refine also succeeded; if the refine hiccuped
+                    // (transient timeout), KEEP the Pass A working row rather than dropping a
+                    // confirmed-working config.
                     refineDone++
-                    if (e.r.status != Status.OK && workingOrder.contains(e.idx)) {
-                        workingOrder.remove(e.idx); if (okCount > 0) okCount--
-                    }
+                    if (e.r.status == Status.OK) results[e.idx] = e.r
                     if (phase.value == "refine") {
                         progress.value = refineDone.toFloat() / refineTotal.coerceAtLeast(1)
                         status.value = "refining $refineDone/$refineTotal · ✓ $okCount online"
                     }
                 } else {
+                    results[e.idx] = e.r
                     if (!allOrder.contains(e.idx)) allOrder.add(e.idx)
                     testDone++
                     if (e.r.status == Status.OK) {
