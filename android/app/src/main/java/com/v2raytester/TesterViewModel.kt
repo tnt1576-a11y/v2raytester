@@ -210,11 +210,13 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteRow(idx: Int) {
         results.remove(idx); allOrder.remove(idx); workingOrder.remove(idx)
+        rewriteWorkingSorted()   // drop it from working.txt too (don't wait for next run)
     }
 
     private fun finishRun() {
         testing.value = false
         phase.value = "idle"
+        progress.value = 0f   // otherwise the bar lingers at 100% until the next run
         rewriteWorkingSorted()
         updateCounts()
     }
@@ -245,18 +247,25 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     results[e.idx] = e.r
                     if (!allOrder.contains(e.idx)) allOrder.add(e.idx)
-                    testDone++
-                    if (e.r.status == Status.OK) {
-                        okCount++
-                        if (!workingOrder.contains(e.idx)) {
-                            workingOrder.add(e.idx)
-                            appendWorkFile(e.r.node.raw)
-                        }
-                    } else if (workingOrder.contains(e.idx)) {
+                    // Working-set membership is updated for both live runs and manual
+                    // retests so the Working tab + working.txt always reflect reality.
+                    val nowOk = e.r.status == Status.OK
+                    val wasWorking = workingOrder.contains(e.idx)
+                    if (nowOk && !wasWorking) {
+                        workingOrder.add(e.idx)
+                        appendWorkFile(e.r.node.raw)
+                    } else if (!nowOk && wasWorking) {
                         workingOrder.remove(e.idx)   // retest flipped to failure
                     }
-                    if (phase.value == "test") progress.value = testDone.toFloat() / testTotal.coerceAtLeast(1)
-                    updateCounts()
+                    // Counters (Tested/Online/progress) belong to a live run only. A
+                    // manual retest reuses this same event with testing == false, and must
+                    // not inflate the totals (it would push testDone past testTotal).
+                    if (testing.value) {
+                        testDone++
+                        if (nowOk) okCount++
+                        if (phase.value == "test") progress.value = testDone.toFloat() / testTotal.coerceAtLeast(1)
+                        updateCounts()
+                    }
                 }
             }
             is Ev.Refine -> {

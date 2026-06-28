@@ -10,8 +10,8 @@ import com.v2raytester.ui.theme.V2rayTesterTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             V2rayTesterTheme {
                 val vm: TesterViewModel = viewModel()
