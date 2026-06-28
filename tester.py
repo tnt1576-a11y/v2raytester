@@ -165,6 +165,52 @@ def _geo_lookup(port, max_time):
         return "", ""
 
 
+# ip-api.com is ~45 req/min per source IP. Geo runs only in the (small) refine pass,
+# but several working configs can share an exit IP, so space geo calls out globally.
+_GEO_SPACING = 1.0
+_geo_lock = threading.Lock()
+_geo_next = [0.0]
+
+
+def _geo_throttle():
+    with _geo_lock:
+        now = time.monotonic()
+        slot = max(now, _geo_next[0])
+        _geo_next[0] = slot + _GEO_SPACING
+    wait = slot - now
+    if wait > 0:
+        time.sleep(wait)
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) // 2
+
+
+def _curl_sample(port, url, max_time):
+    """One latency sample through the local SOCKS proxy. Returns (code, ms):
+    code is the HTTP status string ('204', '000', …) or 'TIMEOUT'; ms is None on no response."""
+    try:
+        out = subprocess.run(
+            [_CURL, "--socks5-hostname", "127.0.0.1:" + str(port),
+             "-o", os.devnull, "-w", "%{http_code} %{time_total}",
+             "--max-time", str(max_time), url],
+            capture_output=True, text=True, timeout=max_time + 4,
+            creationflags=_NO_WINDOW,
+        )
+        parts = (out.stdout or "").strip().split()
+        if len(parts) >= 2:
+            try:
+                ms = int(round(float(parts[1]) * 1000))
+            except ValueError:
+                ms = None
+            return parts[0], ms
+        return "", None
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT", None
+
+
 def _reachable(code):
     """A target counts as reachable if the proxy got a usable HTTP response.
     2xx/3xx = yes; 401/405 = server answered (auth/method) so the path works;
@@ -227,8 +273,11 @@ def _result(node, status, latency=None, message="", detail="",
     }
 
 
-def _proxy_attempt(node, path, settings, stop_event):
-    """One core spawn + latency curl. Returns (result, retryable_bool)."""
+def _proxy_attempt(node, path, settings, stop_event, refine=False):
+    """One core spawn + latency curl. Returns (result, retryable_bool).
+
+    In ``refine`` mode it takes several latency samples (median) and runs geo + Sites;
+    otherwise it's a single fast 204 connectivity check (no geo/Sites)."""
     port = free_port()
     _, cfg = cores.build_config(node, port)
     tmpdir = tempfile.mkdtemp(prefix="v2t_")
@@ -245,7 +294,7 @@ def _proxy_attempt(node, path, settings, stop_event):
                 creationflags=_NO_WINDOW, cwd=os.path.dirname(path),
             )
 
-        if not wait_ready(port, proc, settings.get("start_timeout", 3), stop_event):
+        if not wait_ready(port, proc, settings.get("start_timeout", 5), stop_event):
             if stop_event is not None and stop_event.is_set():
                 return _result(node, ERROR, message="stopped"), False
             detail = _read_file(err_file)
@@ -255,38 +304,32 @@ def _proxy_attempt(node, path, settings, stop_event):
 
         url = settings.get("url", "http://www.gstatic.com/generate_204")
         max_time = settings.get("timeout", 8)
-        try:
-            out = subprocess.run(
-                [_CURL, "--socks5-hostname", "127.0.0.1:" + str(port),
-                 "-o", os.devnull, "-w", "%{http_code} %{time_total}",
-                 "--max-time", str(max_time), url],
-                capture_output=True, text=True, timeout=max_time + 4,
-                creationflags=_NO_WINDOW,
-            )
-        except subprocess.TimeoutExpired:
-            return _result(node, TIMEOUT, message="curl timed out",
-                           detail=_read_file(err_file)), False
-
-        parts = (out.stdout or "").strip().split()
-        cdetail = (out.stderr or "").strip() or _read_file(err_file)
-        if len(parts) >= 2:
-            code, secs = parts[0], parts[1]
-            try:
-                latency = int(round(float(secs) * 1000))
-            except ValueError:
-                latency = None
-            if code == "204":
-                ip, cc = ("", "")
-                if settings.get("geo"):
-                    ip, cc = _geo_lookup(port, max_time)
-                reach = _reach_all(port, settings, stop_event)  # core still alive
-                return _result(node, OK, latency=latency, exit_ip=ip,
-                               country=cc, reach=reach), False
-            if code == "000":
-                return _result(node, TIMEOUT, message="no response (000)", detail=cdetail), False
-            return _result(node, FAILED, latency=latency, message="HTTP " + code,
-                           detail=cdetail), False
-        return _result(node, FAILED, message="no curl output", detail=cdetail), False
+        code, latency = _curl_sample(port, url, max_time)
+        cdetail = _read_file(err_file)
+        if code == "TIMEOUT":
+            return _result(node, TIMEOUT, message="curl timed out", detail=cdetail), False
+        if code == "204":
+            if refine and int(settings.get("latency_samples", 3)) > 1:
+                samples = [latency] if latency is not None else []
+                for _ in range(int(settings.get("latency_samples", 3)) - 1):
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    c, m = _curl_sample(port, url, max_time)
+                    if c == "204" and m is not None:
+                        samples.append(m)
+                if samples:
+                    latency = _median(samples)
+            if not refine:
+                return _result(node, OK, latency=latency), False   # Pass A: no geo/Sites
+            ip, cc = ("", "")
+            if settings.get("geo"):
+                _geo_throttle()
+                ip, cc = _geo_lookup(port, max_time)
+            reach = _reach_all(port, settings, stop_event)  # core still alive
+            return _result(node, OK, latency=latency, exit_ip=ip, country=cc, reach=reach), False
+        if code in ("000", ""):
+            return _result(node, TIMEOUT, message="no response (000)", detail=cdetail), False
+        return _result(node, FAILED, latency=latency, message="HTTP " + code, detail=cdetail), False
     except Exception as e:  # noqa: BLE001
         return _result(node, ERROR, message=str(e)), False
     finally:
@@ -303,33 +346,57 @@ def _proxy_attempt(node, path, settings, stop_event):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_node(node, settings, stop_event=None):
-    """Test a single node. Returns a result dict (never raises)."""
+def _prep(node, settings, stop_event):
+    """Shared setup: returns (path, ping, early_result). early_result is non-None when
+    the node is stopped/unsupported/missing-core and should be returned as-is."""
     if stop_event is not None and stop_event.is_set():
-        return _result(node, ERROR, message="stopped")
-
+        return None, None, _result(node, ERROR, message="stopped")
     try:
         core_name, _ = cores.build_config(node, 1080)
     except ValueError as e:
         res = _result(node, UNSUPPORTED, message=str(e))
         res["tcp_ping"] = tcp_ping(node.get("server", ""), node.get("port", 0),
                                    settings.get("ping_timeout", 3))
-        return res
-
+        return None, None, res
     path = cores.core_path(core_name)
     if not path:
-        return _result(node, ERROR, message=core_name + " binary not found")
+        return None, None, _result(node, ERROR, message=core_name + " binary not found")
+    # reuse the pre-filter's ping if we have it, else measure now (direct, not via proxy)
+    ping = node["_ping"] if "_ping" in node else \
+        tcp_ping(node["server"], node["port"], settings.get("ping_timeout", 3))
+    return path, ping, None
 
-    # direct reachability — reuse the pre-filter's ping if we already have it,
-    # otherwise measure it now (independent of the proxy)
-    if "_ping" in node:
-        ping = node["_ping"]
-    else:
-        ping = tcp_ping(node["server"], node["port"], settings.get("ping_timeout", 3))
 
-    res, retry = _proxy_attempt(node, path, settings, stop_event)
+def test_connect(node, settings, stop_event=None):
+    """Pass A: fast connectivity check (single 204, no geo/Sites). Never raises."""
+    path, ping, early = _prep(node, settings, stop_event)
+    if early is not None:
+        return early
+    res, retry = _proxy_attempt(node, path, settings, stop_event, refine=False)
     if retry and not (stop_event is not None and stop_event.is_set()):
-        res, _ = _proxy_attempt(node, path, settings, stop_event)
+        res, _ = _proxy_attempt(node, path, settings, stop_event, refine=False)
+    res["tcp_ping"] = ping
+    return res
+
+
+def refine_node(node, settings, stop_event=None):
+    """Pass B: accurate re-measure of a working node — median latency + geo + Sites."""
+    path, ping, early = _prep(node, settings, stop_event)
+    if early is not None:
+        return early
+    res, _ = _proxy_attempt(node, path, settings, stop_event, refine=True)
+    res["tcp_ping"] = ping
+    return res
+
+
+def test_node(node, settings, stop_event=None):
+    """Full single test (connectivity + refine) — used for manual retest. Never raises."""
+    path, ping, early = _prep(node, settings, stop_event)
+    if early is not None:
+        return early
+    res, retry = _proxy_attempt(node, path, settings, stop_event, refine=True)
+    if retry and not (stop_event is not None and stop_event.is_set()):
+        res, _ = _proxy_attempt(node, path, settings, stop_event, refine=True)
     res["tcp_ping"] = ping
     return res
 
@@ -430,18 +497,26 @@ def ping_filter(nodes, settings, on_ping, stop_event=None):
     return reachable
 
 
-def run_tests(nodes, settings, on_result, stop_event=None, on_done=None, indices=None):
-    """Test nodes with a thread pool. ``on_result(index, result)`` is called as
-    each finishes. ``indices`` limits which nodes to test (original indices are
-    preserved in the callback). Blocks; intended to run on a worker thread."""
+def run_tests(nodes, settings, on_result, stop_event=None, on_done=None, indices=None,
+              on_refine_start=None):
+    """Two-pass test. ``on_result(index, result, refined)`` is called as each finishes.
+
+    * Pass A — connectivity (``concurrency`` workers): fast 204 check, no geo/Sites;
+      ``refined=False``. The working set is collected.
+    * Pass B — refine (``refine_concurrency`` workers): re-measure the working subset for
+      accurate latency + geo + Sites; ``refined=True``. ``on_refine_start(count)`` fires
+      between the passes. ``indices`` limits which nodes to test. Blocks; run on a worker."""
     if stop_event is None:
         stop_event = threading.Event()
     concurrency = max(1, int(settings.get("concurrency", 8)))
+    refine_conc = max(1, int(settings.get("refine_concurrency", 4)))
     idxs = list(indices) if indices is not None else list(range(len(nodes)))
 
+    # Pass A — connectivity
+    working = []
     ex = ThreadPoolExecutor(max_workers=concurrency)
     try:
-        futures = {ex.submit(test_node, nodes[i], settings, stop_event): i for i in idxs}
+        futures = {ex.submit(test_connect, nodes[i], settings, stop_event): i for i in idxs}
         for fut in as_completed(futures):
             if stop_event.is_set():
                 break
@@ -450,9 +525,34 @@ def run_tests(nodes, settings, on_result, stop_event=None, on_done=None, indices
                 res = fut.result()
             except Exception as e:  # noqa: BLE001
                 res = _result(nodes[idx], ERROR, message=str(e))
-            on_result(idx, res)
+            if res.get("status") == OK:
+                working.append(idx)
+            on_result(idx, res, False)
     finally:
-        # cancel pending tests so Stop halts almost immediately
         ex.shutdown(wait=False, cancel_futures=True)
+
+    # Pass B — refine the working subset at low concurrency for accurate latency + geo + Sites
+    if not stop_event.is_set():
+        working.sort()
+        if on_refine_start is not None:
+            on_refine_start(len(working))
+        if working:
+            ex2 = ThreadPoolExecutor(max_workers=refine_conc)
+            try:
+                futures = {ex2.submit(refine_node, nodes[i], settings, stop_event): i for i in working}
+                for fut in as_completed(futures):
+                    if stop_event.is_set():
+                        break
+                    idx = futures[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        res = _result(nodes[idx], ERROR, message=str(e))
+                    on_result(idx, res, True)
+            finally:
+                ex2.shutdown(wait=False, cancel_futures=True)
+    elif on_refine_start is not None:
+        on_refine_start(0)
+
     if on_done is not None:
         on_done()

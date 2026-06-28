@@ -91,9 +91,11 @@ class App(ctk.CTk):
         self._ping_ms = {}
         self._q = collections.deque()   # worker -> UI messages
         self._pump_id = None
-        self._phase = None              # "ping" | "test"
+        self._phase = None              # "ping" | "test" | "refine"
         self._ping_stat = (0, 0)
         self._ping_total = 0
+        self._refine_total = 0
+        self._refine_done = 0
         self._stopping = False
         self._work_fh = None            # live working.txt handle
         self._work_iids = set()         # node indices currently in Working tab
@@ -403,8 +405,10 @@ class App(ctk.CTk):
             "prefilter": bool(self.prefilter_var.get()),
             "reach_targets": self._reach_targets if self.reach_var.get() else [],
             "ping_concurrency": max(800, threads * 16),
-            "start_timeout": 3,
+            "start_timeout": 5,
             "ping_timeout": 2,
+            "latency_samples": 3,      # Pass B: median of N samples for accurate latency
+            "refine_concurrency": 4,   # Pass B: low concurrency = no contention
         }
 
     def _edit_sites(self):
@@ -517,7 +521,11 @@ class App(ctk.CTk):
                     ms = self._ping_ms.get(i)
                     self._insert_row(i, self.nodes[i], (str(ms) + " ms") if ms is not None else "")
                 elif kind == "result":
-                    self._apply_result(msg[1], msg[2])
+                    self._apply_result(msg[1], msg[2], msg[3])
+                elif kind == "refine":
+                    self._phase = "refine"
+                    self._refine_total = msg[1]
+                    self._refine_done = 0
                 elif kind == "pingstat":
                     self._ping_stat = (msg[1], msg[2])
             self._refresh_status()
@@ -536,6 +544,12 @@ class App(ctk.CTk):
             secs = int(time.time() - getattr(self, "_ping_start", time.time()))
             self.counts.configure(text="pinging " + str(done) + "/" + str(self._ping_total)
                                   + " · " + str(reach) + " reachable · " + str(secs) + "s")
+        elif self._phase == "refine":
+            total = max(1, getattr(self, "_refine_total", 0))
+            done = getattr(self, "_refine_done", 0)
+            self.progress.set(min(1.0, done / total))
+            self.counts.configure(text="refining " + str(done) + "/" + str(getattr(self, "_refine_total", 0))
+                                  + " · " + str(len(self._work_iids)) + " online")
         else:
             done = len(self.results)
             total = max(1, self._test_total or len(self.nodes))
@@ -590,16 +604,19 @@ class App(ctk.CTk):
     def _run(self, nodes, settings, indices):
         tester.run_tests(
             nodes, settings,
-            on_result=lambda i, r: self._q.append(("result", i, r)),
+            on_result=lambda i, r, refined: self._q.append(("result", i, r, refined)),
             stop_event=self.stop_event,
             on_done=lambda: self.after(0, self._phase2_done),
             indices=indices,
+            on_refine_start=lambda n: self._q.append(("refine", n)),
         )
 
     def _phase2_done(self):
         self.testing = False         # pump finalizes once the queue drains
 
-    def _apply_result(self, idx, res):
+    def _apply_result(self, idx, res, refined=False):
+        if refined:
+            self._refine_done = getattr(self, "_refine_done", 0) + 1
         self.results[idx] = res
         iid = str(idx)
         status = res["status"]
