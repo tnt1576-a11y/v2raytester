@@ -1,4 +1,4 @@
-# V2Ray Config Tester
+# V2Ray Tester
 
 A small Python/tkinter desktop app that tells you **which of your V2Ray configs
 actually work on your current network**. For each config it starts the proxy
