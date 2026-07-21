@@ -76,7 +76,12 @@ class RunService : Service() {
         // Screen-off must not pause the run either.
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "v2raytester:run")
-            .apply { runCatching { acquire(WAKE_LOCK_TIMEOUT_MS) } }
+            .apply {
+                // non-counted: re-acquiring only re-arms the timeout, and a single
+                // release() in onDestroy always clears it (counted locks would leak).
+                setReferenceCounted(false)
+                runCatching { acquire(WAKE_LOCK_TIMEOUT_MS) }
+            }
 
         scope.launch {
             RunProgress.state.collect { s ->
@@ -87,6 +92,9 @@ class RunService : Service() {
                 if (now - lastUpdate >= MIN_UPDATE_MS) {
                     lastUpdate = now
                     notify(build(s))
+                    // Re-arm the wake lock while the run is making progress, so a run
+                    // longer than the timeout doesn't silently lose the CPU.
+                    wakeLock?.let { runCatching { it.acquire(WAKE_LOCK_TIMEOUT_MS) } }
                 }
             }
         }
