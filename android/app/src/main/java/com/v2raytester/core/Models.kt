@@ -93,7 +93,9 @@ data class Settings(
     val prefilter: Boolean = true,
     val reachEnabled: Boolean = true,
     val reachTargets: List<ReachTarget> = DEFAULT_REACH_TARGETS,
-    val pingConcurrency: Int = 1000,   // NIO non-blocking connects: ~all in flight on one thread
+    // NIO non-blocking connects on one selector thread. Each in-flight connect is an open
+    // socket = a file descriptor, so this is bounded well under a phone's fd limit.
+    val pingConcurrency: Int = 512,
     val pingTimeoutSec: Int = 2,
     val startTimeoutSec: Int = 5,      // higher: many cores boot at once under load
     // Pass B (refine): re-measure the working subset at LOW concurrency with several

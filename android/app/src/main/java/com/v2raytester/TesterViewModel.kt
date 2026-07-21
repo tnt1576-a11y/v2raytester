@@ -30,6 +30,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
+/** Hard ceiling on how many configs are held at once.
+ *
+ *  Each [Node] carries ~30 fields including the full share-link string, so it costs
+ *  roughly 0.6-1 KB of heap. The aggregator subs now total ~400k configs, which is
+ *  300 MB+ — past `largeHeap` on real phones, and the process gets OOM-killed (worse
+ *  when backgrounded/screen-off, since the low-memory killer reaps the biggest process
+ *  first). 50k is still far more than a run can realistically get through. */
+const val MAX_CONFIGS = 50_000
+
 class TesterViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = Prefs(app)
@@ -78,6 +87,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     private var pingDone = 0; private var pingReach = 0; private var pingTotal = 0
     private var testDone = 0; private var testTotal = 0; private var okCount = 0
     private var refineTotal = 0; private var refineDone = 0
+    private var runError: String? = null   // survives finishRun()'s updateCounts() overwrite
     val skipped = mutableStateOf(0)   // prefilter-dropped (dead) count, surfaced on the Info tab
 
     private sealed class Ev {
@@ -167,7 +177,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         if (ns.isEmpty()) { status.value = "no configs to test"; return }
         results.clear(); allOrder.clear(); workingOrder.clear()
         pingDone = 0; pingReach = 0; testDone = 0; okCount = 0; skipped.value = 0
-        refineTotal = 0; refineDone = 0
+        refineTotal = 0; refineDone = 0; runError = null
         stopFlag = AtomicBoolean(false)
         testing.value = true
         openWorkFile()
@@ -208,6 +218,16 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                     onRefineStart = { n -> events.trySend(Ev.Refine(n)) },
                     stop = stop,
                 )
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c                       // Stop button: normal cancellation path
+            } catch (t: Throwable) {
+                // OutOfMemoryError is an Error, not an Exception, so none of the engine's
+                // `catch (e: Exception)` guards see it — it used to kill the process
+                // mid-run ("app restarted"). Fail the run loudly instead.
+                stopFlag.set(true)
+                runError = if (t is OutOfMemoryError)
+                    "out of memory — too many configs, reduce the list"
+                else "run failed: ${t.message ?: t::class.java.simpleName}"
             } finally {
                 // ALWAYS reset run state — even when the job is cancelled by stop().
                 // Previously finishRun() was the last statement and got skipped on
@@ -306,6 +326,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     private fun updateCounts() {
         var t = "✓ $okCount online · $testDone/$testTotal tested"
         if (skipped.value > 0) t += " · ${skipped.value} skipped"
+        runError?.let { t += " · $it" }
         status.value = t
         // finishRun() clears `testing` before calling this, so the same call that renders
         // the final counts also tells RunService to drop the notification and stop.
@@ -384,7 +405,11 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                                 val l = line.trim()
                                 if (l.isEmpty() || l.startsWith("#") || l.startsWith("//")) continue
                                 val n = try { ShareLinks.parseLink(l) } catch (e: Exception) { null } ?: continue
-                                synchronized(lock) { if (seen.add(n.dedupeKey)) collected.add(n) }
+                                val full = synchronized(lock) {
+                                    if (collected.size < MAX_CONFIGS && seen.add(n.dedupeKey)) collected.add(n)
+                                    collected.size >= MAX_CONFIGS
+                                }
+                                if (full) break        // hit the cap; stop parsing this sub
                             }
                         }
                         val d = done.incrementAndGet()
@@ -405,7 +430,8 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 nodes.clear(); nodes.addAll(collected)
                 configText.value = ""          // don't dump megabytes into the box
                 results.clear(); allOrder.clear(); workingOrder.clear()
-                val msg = "${collected.size} configs loaded"
+                val msg = "${collected.size} configs loaded" +
+                    if (collected.size >= MAX_CONFIGS) " (capped)" else ""
                 status.value = msg
                 subStatus.value = msg
                 fetching.value = false
