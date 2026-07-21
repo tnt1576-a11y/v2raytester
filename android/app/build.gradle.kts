@@ -12,8 +12,8 @@ android {
         applicationId = "com.v2raytester"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 13
+        versionName = "1.0.13"
         // arm64 covers ~all modern phones; x86_64 is added so the app's proxy-test
         // path (which execs the bundled xray binary) also runs on an x86_64 emulator.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }

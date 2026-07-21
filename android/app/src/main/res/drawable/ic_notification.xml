@@ -1,0 +1,12 @@
+<!-- Status-bar icon: must be a flat white silhouette on transparent; Android tints it.
+     (The launcher mipmap is a full-colour bitmap and is NOT valid as a small icon.) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M2,21L23,12 2,3v7l15,2 -15,2z" />
+</vector>
