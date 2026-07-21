@@ -48,6 +48,10 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     )
     private val workFile = File(app.filesDir, "working.txt")
 
+    /** Mirror the status line into the foreground-service notification. */
+    private fun publish(running: Boolean, text: String, prog: Float) =
+        RunProgress.publish(running, text, prog)
+
     // ---- UI state ----
     val configText = mutableStateOf("")
     val settings = mutableStateOf(Settings())
@@ -84,6 +88,11 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
     private val events = Channel<Ev>(Channel.UNLIMITED)
 
     init {
+        // lets the notification's Stop button halt whatever is running
+        RunProgress.stopHandler = {
+            if (testing.value) stop()
+            if (fetching.value) abortFetch()
+        }
         viewModelScope.launch(Dispatchers.Main) {
             settings.value = prefs.settings.first()
             // show only URLs in the editor (drop seeded #/// comment + blank lines)
@@ -162,6 +171,10 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         stopFlag = AtomicBoolean(false)
         testing.value = true
         openWorkFile()
+        // hold the process in the foreground state so switching apps doesn't freeze the
+        // run (and the spawned xray processes); the notification shows live progress.
+        publish(true, "starting…", 0f)
+        RunService.start(getApplication<Application>())
 
         runJob = viewModelScope.launch(Dispatchers.Default) {
             try {
@@ -208,6 +221,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         stopFlag.set(true)
         runJob?.cancel()
         status.value = "stopping…"
+        publish(true, status.value, progress.value)   // finishRun() clears it moments later
     }
 
     fun retest(idx: Int) {
@@ -240,6 +254,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 if (phase.value == "ping") {
                     progress.value = pingDone.toFloat() / pingTotal.coerceAtLeast(1)
                     status.value = "pinging $pingDone/$pingTotal · $pingReach reachable"
+                    publish(true, status.value, progress.value)
                 }
             }
             is Ev.Result -> {
@@ -253,6 +268,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                     if (phase.value == "refine") {
                         progress.value = refineDone.toFloat() / refineTotal.coerceAtLeast(1)
                         status.value = "refining $refineDone/$refineTotal · ✓ $okCount online"
+                        publish(true, status.value, progress.value)
                     }
                 } else {
                     results[e.idx] = e.r
@@ -282,6 +298,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 phase.value = "refine"; refineTotal = e.count; refineDone = 0; progress.value = 0f
                 status.value = if (e.count > 0) "refining 0/${e.count} · ✓ $okCount online"
                                else "✓ $okCount online · ${testDone}/${testTotal} tested"
+                publish(true, status.value, progress.value)
             }
         }
     }
@@ -290,6 +307,9 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         var t = "✓ $okCount online · $testDone/$testTotal tested"
         if (skipped.value > 0) t += " · ${skipped.value} skipped"
         status.value = t
+        // finishRun() clears `testing` before calling this, so the same call that renders
+        // the final counts also tells RunService to drop the notification and stop.
+        publish(testing.value, t, progress.value)
     }
 
     // --------------------------------------------------------------- sorting
@@ -339,6 +359,8 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
         fetchGen++; val gen = fetchGen
         fetching.value = true; subProgress.value = 0f
         subStatus.value = "fetching 0/${urls.size}…"
+        publish(true, subStatus.value, 0f)
+        RunService.start(getApplication<Application>())
         viewModelScope.launch(Dispatchers.IO) {
             // Fetch URLs CONCURRENTLY (bounded) so one slow/dead aggregator can't stall the
             // rest — previously this was a sequential loop and a single hung URL froze the
@@ -372,6 +394,7 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                             if (gen == fetchGen) {
                                 subProgress.value = d.toFloat() / urls.size
                                 subStatus.value = "$d/${urls.size} fetched · ${ok.get()} ok · $c configs"
+                                publish(true, subStatus.value, subProgress.value)
                             }
                         }
                     }
@@ -386,9 +409,19 @@ class TesterViewModel(app: Application) : AndroidViewModel(app) {
                 status.value = msg
                 subStatus.value = msg
                 fetching.value = false
+                publish(false, msg, 1f)   // fetch done -> release the foreground service
             }
         }
     }
 
-    fun abortFetch() { fetchGen++; fetching.value = false; subStatus.value = "aborted" }
+    fun abortFetch() {
+        fetchGen++; fetching.value = false; subStatus.value = "aborted"
+        publish(false, "aborted", 0f)
+    }
+
+    override fun onCleared() {
+        RunProgress.stopHandler = null
+        publish(false, "", 0f)   // VM gone (app swiped away) -> don't leave a stale notification
+        super.onCleared()
+    }
 }
